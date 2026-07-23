@@ -4,6 +4,19 @@
 incdirs-y += include
 srcs-y += hwkm.c hwkm_huk.c hwkm_transaction.c
 
+CFG_QCOM_CE_AES_ECB ?= n
+CFG_QCOM_CE_AES_CBC ?= n
+CFG_QCOM_CE_AES_XTS ?= n
+CFG_QCOM_CE_AES_GCM ?= n
+
+CFG_QCOM_CE_CIPHER := $(if $(filter y,$(CFG_QCOM_CE_AES_ECB) \
+                                       $(CFG_QCOM_CE_AES_CBC) \
+                                       $(CFG_QCOM_CE_AES_XTS)),y,n)
+CFG_QCOM_CE_AEAD := $(if $(filter y,$(CFG_QCOM_CE_AES_GCM)),y,n)
+
+subdirs-$(CFG_QCOM_CE_CIPHER) += ce cipher
+subdirs-$(CFG_QCOM_CE_AEAD) += ce aead
+
 # Bitmap of fuse regions whose SHA256 digest is folded into the HUK KDF input.
 # Each bit corresponds to a fuse region index; set a bit to bind the HUK to
 # that region's content. Defaults to 0 (no fuse regions included).
