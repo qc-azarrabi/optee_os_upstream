@@ -89,6 +89,28 @@ void ce_load_iv(vaddr_t base, const uint8_t iv[CE_AES_BLOCK_SIZE])
 	}
 }
 
+void ce_load_iv_gcm(vaddr_t base, const uint8_t iv[CE_AES_BLOCK_SIZE])
+{
+	uint32_t w = 0;
+	unsigned int i = 0;
+
+	static const uint32_t iv_regs[] = {
+		CE_ENCR_IV0, CE_ENCR_IV1,
+		CE_ENCR_IV2, CE_ENCR_IV3,
+	};
+	static const uint32_t mask_regs[] = {
+		CE_ENCR_CNTR_MASK0, CE_ENCR_CNTR_MASK1,
+		CE_ENCR_CNTR_MASK2, CE_ENCR_CNTR_MASK3,
+	};
+	static const uint32_t masks[] = { 0, 0, 0, 0xffffffffU };
+
+	for (i = 0; i < 4; i++) {
+		memcpy(&w, iv + i * 4, 4);
+		io_write32_off(base, iv_regs[i], w);
+		io_write32_off(base, mask_regs[i], masks[i]);
+	}
+}
+
 static void ce_read_iv(vaddr_t base, uint8_t iv[CE_AES_BLOCK_SIZE])
 {
 	static const uint32_t iv_regs[] = {
@@ -102,6 +124,12 @@ static void ce_read_iv(vaddr_t base, uint8_t iv[CE_AES_BLOCK_SIZE])
 		w = io_read32_off(base, iv_regs[i]);
 		memcpy(iv + i * 4, &w, 4);
 	}
+}
+
+/* Read current ENCR_CNTR_IVn counter back into a byte buffer. */
+void ce_read_cipher_iv(vaddr_t base, uint8_t iv[CE_AES_BLOCK_SIZE])
+{
+	ce_read_iv(base, iv);
 }
 
 /* ce_get_state() - post-completion status check. */
@@ -160,7 +188,7 @@ uint32_t ce_encr_cfg_last(uint32_t mode, size_t key_len, bool encrypt)
 }
 
 uint32_t ce_auth_cfg(uint32_t mode, size_t key_len, bool encrypt,
-		     bool first, bool last)
+		     bool first, bool last, size_t tag_len)
 {
 	uint32_t cfg = 0;
 
@@ -173,6 +201,11 @@ uint32_t ce_auth_cfg(uint32_t mode, size_t key_len, bool encrypt,
 	cfg |= ((key_len == 32 ? CE_KEY_SZ_AES256 : CE_KEY_SZ_AES128)
 		<< CE_AUTH_SEG_CFG_KEY_SZ_SHIFT) &
 	       CE_AUTH_SEG_CFG_KEY_SZ_MASK;
+
+	/* AUTH_SIZE encodes tag length in bytes minus 1. */
+	if (tag_len)
+		cfg |= (((tag_len - 1) << CE_AUTH_SEG_CFG_SIZE_SHIFT) &
+			CE_AUTH_SEG_CFG_SIZE_MASK);
 
 	/* GCM: auth after cipher on encrypt, before cipher on decrypt. */
 	if (encrypt)
@@ -241,65 +274,32 @@ void ce_load_info_nonce(vaddr_t base, const uint32_t nonce[4])
 		io_write32_off(base, CE_AUTH_INFO_NONCE(i), nonce[i]);
 }
 
-/*
- * ce_aes_aead_xfer() - One AEAD segment (auth + optional cipher).
- *
- * Preconditions (caller must satisfy before calling):
- *   - CE lock held via ce_lock()
- *   - CONFIG written via io_write32_off(base, CE_CONFIG, ...)
- *   - Cipher key loaded via ce_load_key()
- *   - Auth key loaded via ce_load_auth_key()
- *   - IV loaded via ce_load_iv()  [cipher counter, incremented from J0]
- *   - ENCR_CCM_INIT_CNTR loaded  [J0, loaded by caller before first segment]
- *   - AUTH_INFO_NONCEn loaded via ce_load_info_nonce()  [final segment only]
- *   - @encr_cfg built via ce_encr_cfg() or ce_encr_cfg_last()
- *   - @auth_cfg built via ce_auth_cfg()
- *
- * @base:          CRYPTO_REG virtual base (from ce_get_base()).
- * @encr_cfg:      ENCR_SEG_CFG value (from ce_encr_cfg / ce_encr_cfg_last).
- * @auth_cfg:      AUTH_SEG_CFG value (from ce_auth_cfg).
- * @in:            Input buffer (@cipher_len bytes); ignored when cipher_len=0.
- * @out:           Output buffer (@cipher_len bytes); ignored when cipher_len=0.
- * @auth_start:    Byte offset within segment where auth begins (usually 0).
- * @auth_len:      Bytes covered by the auth engine (AAD or payload size).
- * @cipher_start:  Byte offset within segment where cipher begins.
- * @cipher_len:    Bytes encrypted/decrypted; 0 for AAD-only segments.
- * @auth_iv:       In/out: AUTH_IVn GHASH accumulator (16 words); loaded
- *                 before and read back after the segment for chaining.
- * @auth_byte_cnt: In/out: AUTH_BYTECNT[0..3] bit counters; loaded and
- *                 read back after the segment for chaining.
- *
- * Returns TEE_SUCCESS on success, or TEE_ERROR_* on error.
- */
-TEE_Result ce_aes_aead_xfer(vaddr_t base, uint32_t encr_cfg,
-			    uint32_t auth_cfg,
-			    const uint8_t *in, uint8_t *out,
-			    size_t auth_start, size_t auth_len,
-			    size_t cipher_start, size_t cipher_len,
-			    uint32_t auth_iv[CE_AUTH_IV_WORDS],
-			    uint32_t auth_byte_cnt[4])
+/* aead_transfer() - internal engine for AEAD segments. */
+static TEE_Result aead_transfer(vaddr_t base, uint32_t encr_cfg,
+				uint32_t auth_cfg,
+				const uint8_t *in, uint8_t *out,
+				size_t auth_start, size_t auth_len,
+				size_t cipher_start, size_t cipher_len)
 {
 	size_t seg_size = MAX(auth_start + auth_len,
 			      cipher_start + cipher_len);
-	unsigned int din_words = cipher_len / 4;
-	unsigned int dout_words = cipher_len / 4;
+
+	unsigned int din_words = (cipher_len ? DIV_ROUND_UP(cipher_len, 4)
+					     : DIV_ROUND_UP(auth_len, 4));
+	unsigned int dout_words = cipher_len ? DIV_ROUND_UP(cipher_len, 4) : 0;
 	unsigned int din_done = 0;
 	unsigned int dout_done = 0;
 	uint32_t status = 0;
 	uint32_t w = 0;
 
-	/* Restore auth engine state from previous segment. */
-	ce_load_auth_iv(base, auth_iv);
-	ce_load_auth_byte_cnt(base, auth_byte_cnt);
-
-	/* Program auth and cipher segment registers. */
-	io_write32_off(base, CE_AUTH_SEG_CFG, auth_cfg);
 	io_write32_off(base, CE_AUTH_SEG_SIZE, auth_len);
 	io_write32_off(base, CE_AUTH_SEG_START, auth_start);
-	io_write32_off(base, CE_ENCR_SEG_CFG, encr_cfg);
+	io_write32_off(base, CE_SEG_SIZE, seg_size);
+	io_write32_off(base, CE_AUTH_SEG_CFG, auth_cfg);
 	io_write32_off(base, CE_ENCR_SEG_SIZE, cipher_len);
 	io_write32_off(base, CE_ENCR_SEG_START, cipher_start);
 	io_write32_off(base, CE_SEG_SIZE, seg_size);
+	io_write32_off(base, CE_ENCR_SEG_CFG, encr_cfg);
 
 	io_write32_off(base, CE_GOPROC, CE_GOPROC_GO);
 
@@ -308,10 +308,8 @@ TEE_Result ce_aes_aead_xfer(vaddr_t base, uint32_t encr_cfg,
 	(void)io_read32_off(base, CE_STATUS);
 
 	/*
-	 * DIN/DOUT loop. For AAD-only segments (cipher_len == 0) the engine
-	 * stalls if any data appears in the DOUT FIFO — flush it each time
-	 * DIN_RDY is set but owcnt is zero. ("Stupid engine!" — uclib
-	 * CE_HWIO_xfer_data() line 493.)
+	 * DIN/DOUT loop. AAD-only: dout_words=0, DIN carries auth data.
+	 * DOUT may stall - flush when DIN_RDY but no DOUT reads expected.
 	 */
 	while (din_done < din_words || dout_done < dout_words) {
 		uint32_t avail = 0;
@@ -364,45 +362,43 @@ TEE_Result ce_aes_aead_xfer(vaddr_t base, uint32_t encr_cfg,
 	}
 
 	/*
-	 * Auth engine requires OPERATION_DONE poll — unlike cipher-only
+	 * Auth engine requires OPERATION_DONE poll - unlike cipher-only
 	 * where DOUT exhaustion is sufficient.
 	 */
 	while (!(io_read32_off(base, CE_STATUS) & CE_STATUS_OPERATION_DONE))
 		;
 
-	/* Save auth state for next segment. */
-	ce_read_auth_iv(base, auth_iv);
-	ce_read_auth_byte_cnt(base, auth_byte_cnt);
-
 	return ce_get_state(base);
 }
 
 /*
- * ce_aes_xfer() - Encrypt or decrypt @len bytes.
- *
- * Preconditions (caller must satisfy before calling):
- *   - CE lock held via ce_lock()
- *   - CONFIG written via io_write32_off(base, CE_CONFIG, ...)
- *   - Cipher key loaded via ce_load_key()
- *   - XTS tweak key loaded via ce_load_xts_key()  [XTS only]
- *   - XTS DU_SIZE written via io_write32_off(base,
- *     CE_ENCR_XTS_DU_SIZE, len) [XTS only]
- *   - IV loaded via ce_load_iv()  [CBC, XTS, ECB with zero IV]
- *   - @encr_cfg built via ce_encr_cfg()
- *
- * @base: CRYPTO_REG virtual base (from ce_get_base()).
- * @encr_cfg: ENCR_SEG_CFG register value (from ce_encr_cfg()).
- * @in: Input buffer; @len bytes, multiple of CE_AES_BLOCK_SIZE.
- * @out: Output buffer; @len bytes.
- * @len: Transfer length in bytes; must be a non-zero multiple of 16.
- * @iv_out: Receives the hardware-updated IV/tweak after the transfer.
- *          CBC: pass c->iv - hardware writes the last ciphertext block,
- *               which becomes the IV for the next update() call.
- *          XTS: pass c->tweak - hardware writes the final GF(2^128)
- *               tweak value after processing all blocks in the segment.
- *          ECB: pass NULL - IV registers are unused.
- *
- * Returns TEE_SUCCESS on success, or TEE_ERROR_* on error.
+ * ce_aes_aead_auth() - Feed one AAD block through the auth engine only.
+ * Caller must load AUTH_IVn/AUTH_BYTECNTn before and read them back after.
+ */
+TEE_Result ce_aes_aead_auth(vaddr_t base, uint32_t auth_cfg,
+			    const uint8_t *aad, size_t aad_len)
+{
+	return aead_transfer(base, 0, auth_cfg, aad, NULL,
+			     0, aad_len, aad_len, 0);
+}
+
+/*
+ * ce_aes_aead_xfer() - Encrypt/decrypt @len bytes with simultaneous auth.
+ * Caller must load AUTH_IVn/AUTH_BYTECNTn before and read them back after.
+ */
+TEE_Result ce_aes_aead_xfer(vaddr_t base, uint32_t encr_cfg,
+			    uint32_t auth_cfg,
+			    const uint8_t *in, uint8_t *out,
+			    size_t len)
+{
+	return aead_transfer(base, encr_cfg, auth_cfg, in, out,
+			     0, len, 0, len);
+}
+
+/*
+ * ce_aes_xfer() - Encrypt or decrypt @len bytes (cipher-only).
+ * Caller must load IV/key before and pass @iv_out to read back the updated IV
+ * (CBC: last ciphertext block; XTS: final tweak; ECB: pass NULL).
  */
 TEE_Result ce_aes_xfer(vaddr_t base, uint32_t encr_cfg,
 		       const uint8_t *in, uint8_t *out, size_t len,
