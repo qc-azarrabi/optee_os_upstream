@@ -106,6 +106,8 @@ struct sbi_mpxy_rpmi_context {
 /* Forward declaration of the RPMI context */
 extern struct sbi_mpxy_rpmi_context *sbi_mpxy_rpmi_ctx;
 
+struct thread_abi_args;
+
 /* RPMI Request Forward ServiceGroup Definitions */
 struct rpmi_reqfwd_retrieve_current_message_req {
 	uint32_t start_index;
@@ -200,6 +202,23 @@ void thread_return_to_udomain_by_sbi_mpxy(unsigned long arg0,
 					  unsigned long arg3,
 					  unsigned long arg4,
 					  unsigned long arg5 __unused);
+
+/*
+ * Return the MPXY channel id of the RPMI TEE service group (0x0010), used by
+ * parcel consumption to issue MEM_PARCEL_ACCEPT / RELEASE. Returns 0 on
+ * success, -1 if no TEE channel was probed.
+ */
+int sbi_mpxy_rpmi_get_tee_channel_id(uint32_t *channel_id);
+
+/*
+ * Consume a parcel forwarded from the REE: accept it on the TEE channel, map
+ * its non-secure pages into OP-TEE core, write the pattern to prove access,
+ * then unmap and release. The four 32-bit inputs are packed into two registers:
+ *   a1 = parcel_id      | (nonce   << 32)
+ *   a2 = creator_access | (pattern << 32)
+ * On return a0 = status, a1 = value read back.
+ */
+void rpmi_tee_parcel_consume(struct thread_abi_args *args);
 
 #endif /*__ASSEMBLER__*/
 #endif /*defined(CFG_RISCV_SBI_MPXY_RPMI)*/

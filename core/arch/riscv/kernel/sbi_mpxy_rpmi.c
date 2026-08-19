@@ -309,6 +309,33 @@ static int rpmi_get_reqfwd_channel_id_by_hartid(uint32_t hartid,
 	return -1;
 }
 
+/*
+ * Return the MPXY channel id of the RPMI TEE service group (0x0010). Parcel
+ * consumption issues MEM_PARCEL_ACCEPT / MEM_PARCEL_RELEASE on this channel.
+ * The trusted domain reaches it directly; MPXY channel access is not
+ * domain-gated. Returns 0 on success, -1 if no TEE channel was probed.
+ */
+#define RPMI_SRVGRP_TEE			0x0010
+
+int sbi_mpxy_rpmi_get_tee_channel_id(uint32_t *channel_id)
+{
+	struct sbi_mpxy_rpmi_channel *channel = NULL;
+	uint32_t i = 0;
+
+	if (!sbi_mpxy_rpmi_ctx)
+		return -1;
+
+	for (i = 0; i < sbi_mpxy_rpmi_ctx->channel_count; i++) {
+		channel = &sbi_mpxy_rpmi_ctx->channels[i];
+		if (channel->rpmi_attrs.servicegroup_id == RPMI_SRVGRP_TEE) {
+			*channel_id = channel->channel_id;
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
 /* Called with all exception being masked */
 static void
 thread_sbi_mpxy_reqfwd_retrieve_message(struct thread_abi_args *args)
