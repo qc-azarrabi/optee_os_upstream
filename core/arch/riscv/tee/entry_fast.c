@@ -16,6 +16,10 @@
 #include <tee/entry_fast.h>
 #include <tee/optee_abi.h>
 
+#if defined(CFG_RISCV_SBI_MPXY_RPMI)
+#include <sbi_mpxy_rpmi.h>
+#endif
+
 #ifdef CFG_CORE_RESERVED_SHM
 static void tee_entry_get_shm_config(struct thread_abi_args *args)
 {
@@ -259,6 +263,12 @@ void __tee_entry_fast(struct thread_abi_args *args)
 		else
 			args->a0 = OPTEE_ABI_RETURN_UNKNOWN_FUNCTION;
 		break;
+
+#if defined(CFG_RISCV_SBI_MPXY_RPMI)
+	case OPTEE_ABI_CONSUME_PARCEL:
+		rpmi_tee_parcel_consume(args);
+		break;
+#endif
 
 	default:
 		args->a0 = OPTEE_ABI_RETURN_UNKNOWN_FUNCTION;

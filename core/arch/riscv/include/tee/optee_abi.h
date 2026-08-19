@@ -702,4 +702,22 @@
 	((((ret) & OPTEE_ABI_RETURN_RPC_PREFIX_MASK) == \
 		OPTEE_ABI_RETURN_RPC_PREFIX))); })
 
+/*
+ * Consume an RPMI TEE memory parcel from the REE (fast call). Maps the
+ * parcel's non-secure pages into OP-TEE core, writes a caller pattern to prove
+ * genuine TEE access, then unmaps and releases.
+ *
+ * Call register usage:
+ * a0	OPTEE_ABI_CONSUME_PARCEL
+ * a1	parcel_id | (nonce   << 32)
+ * a2	creator_access  | (pattern << 32)
+ *
+ * Return register usage:
+ * a0	Consume status (0 = success)
+ * a1	Value read back from the mapped memory
+ */
+#define OPTEE_ABI_FUNCID_CONSUME_PARCEL	U(0x100)
+#define OPTEE_ABI_CONSUME_PARCEL \
+	OPTEE_ABI_FAST_CALL_VAL(OPTEE_ABI_FUNCID_CONSUME_PARCEL)
+
 #endif /* __TEE_OPTEE_ABI_H */
