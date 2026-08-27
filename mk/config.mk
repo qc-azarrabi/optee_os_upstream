@@ -1066,6 +1066,12 @@ ifeq ($(filter y, $(CFG_CORE_SEL1_SPMC) $(CFG_CORE_SEL2_SPMC) \
 # FF-A case, handled via the FF-A ABI
 CFG_CORE_ASYNC_NOTIF ?= y
 $(call force,_CFG_CORE_ASYNC_NOTIF_DEFAULT_IMPL,n)
+else ifeq ($(filter y, $(CFG_RV64_core) $(CFG_RV32_core)),y)
+# RISC-V provides its own async-notif backend (core/arch/riscv/kernel/notif.c)
+# which raises the RPMI TEE signal bus instead of a GIC PPI, so the ARM/GIC
+# default impl (core/kernel/notif_default.c) is never built.
+CFG_CORE_ASYNC_NOTIF ?= n
+$(call force,_CFG_CORE_ASYNC_NOTIF_DEFAULT_IMPL,n)
 else
 # CFG_CORE_ASYNC_NOTIF is defined by the platform to enable support
 # for sending asynchronous notifications to normal world.

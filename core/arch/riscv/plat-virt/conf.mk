@@ -38,6 +38,12 @@ CFG_16550_UART ?= y
 CFG_RISCV_SBI_MPXY ?= y
 CFG_RISCV_SBI_MPXY_RPMI ?= y
 
+# Asynchronous notifications to normal world. Uses the RISC-V notif backend
+# (core/arch/riscv/kernel/notif.c) which raises the RPMI TEE signal bus, NOT
+# the ARM/GIC default impl (core/kernel/notif_default.c, forced off for RISC-V
+# in mk/config.mk).
+CFG_CORE_ASYNC_NOTIF ?= y
+
 $(call force,CFG_RISCV_M_MODE,n)
 $(call force,CFG_RISCV_S_MODE,y)
 $(call force,CFG_RISCV_TIME_SOURCE_RDTIME,y)
