@@ -129,6 +129,7 @@ static void handle_get_devices(struct virtio_msg_hdr *hdr, size_t max_msg_size)
 	bitstr_t *bs = (void *)(resp + 1);
 	size_t req_count = 0;
 	size_t pop_count = 0;
+	size_t bs_bytes = 0;
 
 	if (hdr->dev_num || hdr->msg_size != sizeof(*hdr) + sizeof(*req))
 		goto err;
@@ -137,16 +138,17 @@ static void handle_get_devices(struct virtio_msg_hdr *hdr, size_t max_msg_size)
 	if (req->offset)
 		goto err;
 
-	if (sizeof(*hdr) + sizeof(*resp) + req->count / 8 > max_msg_size)
+	req_count = req->count;
+	bs_bytes = bitstr_size(req_count);
+	if (sizeof(*hdr) + sizeof(*resp) + bs_bytes > max_msg_size)
 		goto err;
 
-	req_count = req->count;
 	if (virtio_dev_get_devices_bitstring(bs, req_count, &pop_count))
 		goto err;
 	resp->offset = 0;
 	resp->count = pop_count;
 	resp->next_offset = 0;
-	hdr->msg_size = sizeof(*hdr) + sizeof(*resp) + req_count / 8;
+	hdr->msg_size = sizeof(*hdr) + sizeof(*resp) + bs_bytes;
 
 	return;
 err:
@@ -206,11 +208,18 @@ static void handle_get_dev_features(struct virtio_msg_hdr *hdr)
 	if (!vdev)
 		goto err;
 
+	/*
+	 * Bound the block index and count before scaling to bit counts so the
+	 * multiplication below cannot overflow size_t (32-bit on the AArch32
+	 * core) and defeat the range check.
+	 */
+	if (v->block_count > VIRTIO_MAX_FEATURE_BIT_COUNT / block_size ||
+	    v->block_idx > VIRTIO_MAX_FEATURE_BIT_COUNT / block_size)
+		goto err;
+
 	count = v->block_count * block_size;
 	offs = v->block_idx * block_size;
-	if (count > VIRTIO_MAX_FEATURE_BIT_COUNT ||
-	    offs > VIRTIO_MAX_FEATURE_BIT_COUNT ||
-	    count + offs > VIRTIO_MAX_FEATURE_BIT_COUNT)
+	if (count + offs > VIRTIO_MAX_FEATURE_BIT_COUNT)
 		goto err;
 
 	memset(v + 1, 0, v->block_count * sizeof(uint32_t));
@@ -234,6 +243,15 @@ static void handle_set_drv_features(struct virtio_msg_hdr *hdr)
 	vdev = virtio_dev_lookup(hdr->dev_num);
 	if (!vdev)
 		goto out;
+	/*
+	 * Bound block index/count before scaling so the bit-count
+	 * multiplication cannot overflow size_t and bypass the range check.
+	 */
+	if (v->block_count > VIRTIO_MAX_FEATURE_BIT_COUNT / block_size ||
+	    v->block_idx > VIRTIO_MAX_FEATURE_BIT_COUNT / block_size) {
+		vdev->features_ok = false;
+		goto out;
+	}
 	if (hdr->msg_size != sizeof(*hdr) + sizeof(*v) +
 			     v->block_count * sizeof(uint32_t)) {
 		vdev->features_ok = false;
@@ -242,9 +260,7 @@ static void handle_set_drv_features(struct virtio_msg_hdr *hdr)
 
 	count = v->block_count * block_size;
 	offs = v->block_idx * block_size;
-	if (count > VIRTIO_MAX_FEATURE_BIT_COUNT ||
-	    offs > VIRTIO_MAX_FEATURE_BIT_COUNT ||
-	    count + offs > VIRTIO_MAX_FEATURE_BIT_COUNT) {
+	if (count + offs > VIRTIO_MAX_FEATURE_BIT_COUNT) {
 		vdev->features_ok = false;
 		goto out;
 	}
