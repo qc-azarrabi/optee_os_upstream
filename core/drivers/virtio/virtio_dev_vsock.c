@@ -286,7 +286,14 @@ static void handle_op_rw(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 	vvs->peer_buf_alloc = req->buf_alloc;
 	vvs->peer_fwd_cnt = req->fwd_cnt;
 
-	if (vvs->rx_cnt - vvs->fwd_cnt > vvs->buf_alloc) {
+	/*
+	 * rx_cnt counts all bytes received from the peer; fwd_cnt counts the
+	 * bytes already delivered to the local owner (advanced in
+	 * virtio_vsock_msgq_dequeue()). The peer must not have more than
+	 * buf_alloc bytes outstanding (received but not yet forwarded).
+	 */
+	if (req->len > vvs->buf_alloc ||
+	    vvs->rx_cnt - vvs->fwd_cnt > vvs->buf_alloc - req->len) {
 		DMSG("Peer is overdrafting from allocated buffer");
 		goto err;
 	}
@@ -318,7 +325,7 @@ static void handle_op_rw(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 	if (TRACE_LEVEL >= TRACE_FLOW)
 		DHEXDUMP(msg->data.buf, msg->data.len);
 
-	vvs->fwd_cnt += req->len;
+	vvs->rx_cnt += req->len;
 	virtio_vsock_msgq_lock(vvs);
 	add_msg(&vvs->msgs, msg);
 	virtio_vsock_msgq_unlock(vvs);
@@ -446,8 +453,8 @@ static void handle_op_rst(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 		return;
 	}
 
-	vvs = find_socket2(req->dst_cid, req->src_cid, req->dst_port,
-			   req->src_port, req->type);
+	vvs = find_socket2(req->src_cid, req->dst_cid, req->src_port,
+			   req->dst_port, req->type);
 	if (vvs) {
 		DMSG("Killing socket");
 		vvs->dead = true;
@@ -532,12 +539,20 @@ static bool reply_op(struct virtio_dev_vq *vq, struct virtio_vsock_socket *vvs,
 {
 	struct vringh_ctx wctx = { };
 	struct virtio_vsock_hdr resp = {
-		.src_cid = vvs->src_cid,
-		.dst_cid = vvs->dst_cid,
-		.src_port = vvs->src_port,
-		.dst_port = vvs->dst_port,
+		/*
+		 * Device->driver messages put the host (device) side as the
+		 * source and the normal-world peer as the destination, matching
+		 * the orientation used by init_resp_hdr() and
+		 * virtio_vsock_send().
+		 */
+		.src_cid = vvs->dst_cid,
+		.dst_cid = vvs->src_cid,
+		.src_port = vvs->dst_port,
+		.dst_port = vvs->src_port,
 		.type = vvs->type,
 		.op = op,
+		.buf_alloc = vvs->buf_alloc,
+		.fwd_cnt = vvs->fwd_cnt,
 	};
 
 	if (vringh_get_writable(vq, &wctx, sizeof(resp)))
@@ -547,6 +562,18 @@ static bool reply_op(struct virtio_dev_vq *vq, struct virtio_vsock_socket *vvs,
 	vringh_complete_len(&wctx, sizeof(resp));
 
 	return true;
+}
+
+/*
+ * Advertise our current credit (buf_alloc/fwd_cnt) to the peer. Best-effort:
+ * if no RX buffer is available the update is simply skipped, and the peer will
+ * learn the new credit from the next message we send. The socket lock must be
+ * held by the caller.
+ */
+static void send_credit_update(struct virtio_vsock_socket *vvs)
+{
+	reply_op(vvs->dev->vdev.vqs + VIRTIO_VSOCK_VQ_IDX_RX, vvs,
+		 VIRTIO_VSOCK_OP_CREDIT_UPDATE);
 }
 
 static bool process_backlog(struct virtio_dev_vq *vq)
@@ -759,8 +786,21 @@ void virtio_vsock_msgq_dequeue(struct virtio_vsock_socket *vvs,
 			       struct virtio_vsock_msg *m)
 {
 	assert(m);
-	if (m->type == VIRTIO_VSOCKET_MSG_TYPE_DATA)
-		vvs->rx_cnt += m->data.len;
+	/*
+	 * Delivering received data to the local owner advances fwd_cnt, which
+	 * is what we advertise back to the peer as consumed (freeing credit).
+	 * Proactively send a credit update so a one-way peer->host stream does
+	 * not stall: the normal-world frontend only refreshes its view of our
+	 * credit from messages we send, and never polls with CREDIT_REQUEST.
+	 */
+	if (m->type == VIRTIO_VSOCKET_MSG_TYPE_DATA) {
+		vvs->fwd_cnt += m->data.len;
+		TAILQ_REMOVE(&vvs->msgs, m, link);
+		free(m);
+		if (!vvs->dead)
+			send_credit_update(vvs);
+		return;
+	}
 	TAILQ_REMOVE(&vvs->msgs, m, link);
 	free(m);
 }
