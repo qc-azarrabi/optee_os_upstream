@@ -32,8 +32,11 @@ static TEE_Result vsock_open(TEE_iSocketHandle *ctx, void *setup,
 		return TEE_ERROR_OUT_OF_MEMORY;
 
 	res = __tee_socket_pta_vsock_open(vsetup, &vctx->handle);
-	if (res)
+	if (res) {
 		TEE_Free(vctx);
+		*ctx = TEE_HANDLE_NULL;
+		return res;
+	}
 
 	*ctx = (TEE_iSocketHandle)vctx;
 	return res;
