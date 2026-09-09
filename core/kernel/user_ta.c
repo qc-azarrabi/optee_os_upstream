@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <compiler.h>
 #include <crypto/crypto.h>
+#include <drivers/virtio/virtio_vsock.h>
 #include <initcall.h>
 #include <keep.h>
 #include <kernel/ldelf_loader.h>
@@ -388,6 +389,11 @@ static void release_utc_state(struct user_ta_ctx *utc)
 	}
 
 	vm_info_final(&utc->uctx);
+
+#ifdef CFG_VIRTIO_VSOCK
+	/* Close vsock sockets opened by this TA */
+	handle_db_destroy(&utc->vsock_hdb, virtio_vsock_destructor);
+#endif
 
 	/* Free cryp states created by this TA */
 	tee_svc_cryp_free_states(utc);

@@ -7,9 +7,10 @@
 #define __KERNEL_USER_TA_H
 
 #include <assert.h>
+#include <kernel/handle.h>
 #include <kernel/tee_ta_manager.h>
-#include <kernel/user_mode_ctx_struct.h>
 #include <kernel/thread.h>
+#include <kernel/user_mode_ctx_struct.h>
 #include <mm/file.h>
 #include <mm/tee_mm.h>
 #include <scattered_array.h>
@@ -28,6 +29,7 @@ SLIST_HEAD(load_seg_head, load_seg);
  * @cryp_states:	List of cryp states created by this TA
  * @objects:		List of storage objects opened by this TA
  * @storage_enums:	List of storage enumerators opened by this TA
+ * @vsock_hdb:		Handle database for virtio vsock sockets
  * @uctx:		Generic user mode context
  * @ctx:		Generic TA context
  */
@@ -36,6 +38,9 @@ struct user_ta_ctx {
 	struct tee_cryp_state_head cryp_states;
 	struct tee_obj_head objects;
 	struct tee_storage_enum_head storage_enums;
+#ifdef CFG_VIRTIO_VSOCK
+	struct handle_db vsock_hdb;
+#endif
 	struct user_mode_ctx uctx;
 	struct tee_ta_ctx ta_ctx;
 };
