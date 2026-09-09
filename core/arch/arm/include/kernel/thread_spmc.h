@@ -21,6 +21,9 @@
 
 #define SPMC_CORE_SEL1_MAX_SHM_COUNT	64
 
+/* Number of 32-bit words in an FF-A UUID */
+#define SPMC_WORDS_PER_UUID		4
+
 struct ffa_rxtx {
 	void *rx;
 	void *tx;
@@ -62,7 +65,13 @@ struct spmc_lsp_desc {
 			   struct sp_session *caller_sp);
 	uint16_t sp_id;
 	uint32_t properties;
-	uint32_t uuid_words[4];
+	/*
+	 * One or more FF-A UUIDs, each SPMC_WORDS_PER_UUID little-endian
+	 * words. An LSP may advertise several UUIDs (e.g. the OP-TEE core
+	 * endpoint also carries the virtio-msg bus UUID).
+	 */
+	uint16_t uuid_count;
+	const uint32_t *uuid_words;
 	const char *name;
 	STAILQ_ENTRY(spmc_lsp_desc) link;
 };

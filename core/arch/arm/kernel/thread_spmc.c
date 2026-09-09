@@ -20,6 +20,9 @@
 #include <kernel/thread_private.h>
 #include <kernel/thread_spmc.h>
 #include <kernel/virtualization.h>
+#if defined(CFG_VIRTIO_MSG_FFA)
+#include <kernel/virtio_msg_ffa.h>
+#endif
 #include <libfdt.h>
 #include <mm/core_mmu.h>
 #include <mm/mobj.h>
@@ -587,26 +590,23 @@ TEE_Result spmc_fill_partition_entry(uint32_t ffa_vers, void *buf, size_t blen,
 	return TEE_SUCCESS;
 }
 
-static TEE_Result lsp_partition_info_get(uint32_t ffa_vers, void *buf,
-					 size_t buf_size, size_t *elem_count,
-					 const uint32_t uuid_words[4],
-					 bool count_only)
+static TEE_Result fill_lsp_entries(uint32_t ffa_vers, void *buf,
+				   size_t buf_size, size_t *elem_count,
+				   const uint32_t uuid_words[4],
+				   bool count_only, struct spmc_lsp_desc *desc)
 {
-	struct spmc_lsp_desc *desc = NULL;
+	const size_t sz = sizeof(uint32_t) * SPMC_WORDS_PER_UUID;
 	TEE_Result res = TEE_SUCCESS;
 	size_t c = *elem_count;
+	size_t n = 0;
 
-	STAILQ_FOREACH(desc, &lsp_head, link) {
-		/*
-		 * LSPs (OP-TEE SPMC) without an assigned UUID are not
-		 * proper LSPs and shouldn't be reported here.
-		 */
-		if (is_nil_uuid(desc->uuid_words[0], desc->uuid_words[1],
-				desc->uuid_words[2], desc->uuid_words[3]))
-			continue;
-
-		if (uuid_words && memcmp(uuid_words, desc->uuid_words,
-					 sizeof(desc->uuid_words)))
+	/*
+	 * LSPs (OP-TEE SPMC) without an assigned UUID are not proper LSPs
+	 * and are not reported here: a zero uuid_count skips the loop.
+	 */
+	for (n = 0; n < desc->uuid_count * SPMC_WORDS_PER_UUID;
+	     n += SPMC_WORDS_PER_UUID) {
+		if (uuid_words && memcmp(uuid_words, desc->uuid_words + n, sz))
 			continue;
 
 		if (!count_only && !res)
@@ -614,13 +614,31 @@ static TEE_Result lsp_partition_info_get(uint32_t ffa_vers, void *buf,
 							c, desc->sp_id,
 							CFG_TEE_CORE_NB_CORE,
 							desc->properties,
-							desc->uuid_words);
+							desc->uuid_words + n);
 		c++;
 	}
 
 	*elem_count = c;
 
 	return res;
+}
+
+static TEE_Result lsp_partition_info_get(uint32_t ffa_vers, void *buf,
+					 size_t buf_size, size_t *elem_count,
+					 const uint32_t uuid_words[4],
+					 bool count_only)
+{
+	struct spmc_lsp_desc *desc = NULL;
+	TEE_Result res = TEE_SUCCESS;
+
+	STAILQ_FOREACH(desc, &lsp_head, link) {
+		res = fill_lsp_entries(ffa_vers, buf, buf_size, elem_count,
+				       uuid_words, count_only, desc);
+		if (res)
+			return res;
+	}
+
+	return TEE_SUCCESS;
 }
 
 void spmc_handle_partition_info_get(struct thread_smc_1_2_regs *args,
@@ -933,6 +951,23 @@ optee_lsp_handle_direct_request(struct thread_smc_1_2_regs *args,
 	}
 
 	if (args->a0 == FFA_MSG_SEND_DIRECT_REQ2) {
+#if defined(CFG_VIRTIO_MSG_FFA)
+		/*
+		 * The virtio-msg bus over FF-A is carried on DIRECT_REQ2
+		 * addressed to the virtio-msg UUID
+		 * (c66028b5-2498-4aa1-9de7-77da6122abf0). Any other UUID on
+		 * REQ2 is not supported by the core endpoint.
+		 */
+		if (args->a2 == 0xa14a9824b52860c6 &&
+		    args->a3 == 0xf0ab2261da77e79d) {
+			virtio_msg_ffa_recv(args, FFA_SRC(args->a1));
+			args->a0 = FFA_MSG_SEND_DIRECT_RESP2;
+			args->a1 = swap_src_dst(args->a1);
+			args->a2 = 0;
+			args->a3 = 0;
+			return;
+		}
+#endif
 		set_simple_ret_val(args, FFA_NOT_SUPPORTED);
 		return;
 	}
@@ -2519,8 +2554,9 @@ static TEE_Result check_desc(struct spmc_lsp_desc *d)
 		return TEE_ERROR_BAD_FORMAT;
 	}
 
-	if (!d->uuid_words[0] && !d->uuid_words[1] &&
-	    !d->uuid_words[2] && !d->uuid_words[3]) {
+	if (d->uuid_count && (!d->uuid_words ||
+	    (!d->uuid_words[0] && !d->uuid_words[1] &&
+	     !d->uuid_words[2] && !d->uuid_words[3]))) {
 		EMSG("Found NULL UUID for LSP \"%s\" %#"PRIx16,
 		     d->name, d->sp_id);
 		if (!IS_ENABLED(CFG_SP_SKIP_FAILED))
@@ -2568,17 +2604,7 @@ TEE_Result spmc_register_lsp(struct spmc_lsp_desc *desc)
 	return TEE_SUCCESS;
 }
 
-static struct spmc_lsp_desc optee_core_lsp __nex_data = {
-	.name = "OP-TEE",
-	.direct_req = optee_lsp_handle_direct_request,
-	.properties = FFA_PART_PROP_DIRECT_REQ_RECV |
-		      FFA_PART_PROP_DIRECT_REQ_SEND |
-#ifdef CFG_NS_VIRTUALIZATION
-		      FFA_PART_PROP_NOTIF_CREATED |
-		      FFA_PART_PROP_NOTIF_DESTROYED |
-#endif
-		      FFA_PART_PROP_AARCH64_STATE |
-		      FFA_PART_PROP_IS_PE_ID,
+static const uint32_t optee_core_lsp_uuids[] __nex_data = {
 	/*
 	 * - if the SPMC is in S-EL2 this UUID describes OP-TEE as a S-EL1
 	 *   SP, or
@@ -2587,7 +2613,34 @@ static struct spmc_lsp_desc optee_core_lsp __nex_data = {
 	 *   SPMC
 	 * UUID 486178e0-e7f8-11e3-bc5e-0002a5d5c51b
 	 */
-	.uuid_words = { 0xe0786148, 0xe311f8e7, 0x02005ebc, 0x1bc5d5a5, },
+	0xe0786148, 0xe311f8e7, 0x02005ebc, 0x1bc5d5a5,
+#if defined(CFG_VIRTIO_MSG_FFA)
+	/*
+	 * The virtio-msg bus over FF-A is served by the OP-TEE core
+	 * endpoint. The normal-world driver binds to this UUID.
+	 * UUID c66028b5-2498-4aa1-9de7-77da6122abf0
+	 */
+	0xb52860c6, 0xa14a9824, 0xda77e79d, 0xf0ab2261,
+#endif
+};
+
+static struct spmc_lsp_desc optee_core_lsp __nex_data = {
+	.name = "OP-TEE",
+	.direct_req = optee_lsp_handle_direct_request,
+	.properties = FFA_PART_PROP_DIRECT_REQ_RECV |
+		      FFA_PART_PROP_DIRECT_REQ_SEND |
+#if defined(CFG_VIRTIO_MSG_FFA)
+		      FFA_PART_PROP_DIRECT_REQ2_RECV |
+		      FFA_PART_PROP_DIRECT_REQ2_SEND |
+#endif
+#ifdef CFG_NS_VIRTUALIZATION
+		      FFA_PART_PROP_NOTIF_CREATED |
+		      FFA_PART_PROP_NOTIF_DESTROYED |
+#endif
+		      FFA_PART_PROP_AARCH64_STATE |
+		      FFA_PART_PROP_IS_PE_ID,
+	.uuid_words = optee_core_lsp_uuids,
+	.uuid_count = ARRAY_SIZE(optee_core_lsp_uuids) / SPMC_WORDS_PER_UUID,
 };
 
 #if defined(CFG_CORE_SEL1_SPMC)
