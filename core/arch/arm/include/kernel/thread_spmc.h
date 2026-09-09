@@ -60,6 +60,14 @@ struct sp_session;
 struct spmc_lsp_desc {
 	void (*direct_req)(struct thread_smc_1_2_regs *args,
 			   struct sp_session *caller_sp);
+	/*
+	 * Optional handler for FFA_MSG_SEND_DIRECT_REQ2 requests. When NULL
+	 * such requests are rejected with FFA_NOT_SUPPORTED. The REQ2 UUID is
+	 * carried in args->a2 and args->a3 (little endian) and can be used to
+	 * multiplex several services onto a single LSP endpoint.
+	 */
+	void (*direct_req2)(struct thread_smc_1_2_regs *args,
+			    struct sp_session *caller_sp);
 	uint16_t sp_id;
 	uint32_t properties;
 	uint32_t uuid_words[4];
@@ -70,6 +78,22 @@ struct spmc_lsp_desc {
 struct spmc_lsp_desc *spmc_find_lsp_by_sp_id(uint16_t sp_id);
 
 TEE_Result spmc_register_lsp(struct spmc_lsp_desc *desc);
+
+/*
+ * FFA_MSG_SEND_DIRECT_REQ2 UUID handler. Handlers are matched against the
+ * REQ2 UUID (args->a2/a3, little endian) so that services can be dispatched by
+ * UUID on OP-TEE's core endpoint without editing the SPMC dispatcher. This
+ * works both when OP-TEE is the S-EL1 SPMC and when it is an SP under an
+ * external SPMC, since in both cases REQ2 is delivered to the core endpoint.
+ */
+struct spmc_uuid_handler {
+	uint32_t uuid_words[4];
+	void (*recv)(struct thread_smc_1_2_regs *args);
+	const char *name;
+	SLIST_ENTRY(spmc_uuid_handler) link;
+};
+
+TEE_Result spmc_register_uuid_handler(struct spmc_uuid_handler *handler);
 
 #if defined(CFG_CORE_SEL1_SPMC)
 void thread_spmc_set_async_notif_intid(int intid);

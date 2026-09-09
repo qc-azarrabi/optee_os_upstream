@@ -64,6 +64,11 @@ STAILQ_HEAD(spmc_lsp_desc_head, spmc_lsp_desc);
 static struct spmc_lsp_desc_head lsp_head __nex_data =
 	STAILQ_HEAD_INITIALIZER(lsp_head);
 
+SLIST_HEAD(spmc_uuid_handler_head, spmc_uuid_handler);
+
+static struct spmc_uuid_handler_head uuid_handler_head __nex_data =
+	SLIST_HEAD_INITIALIZER(uuid_handler_head);
+
 static unsigned int spmc_notif_lock __nex_data = SPINLOCK_UNLOCK;
 static bool spmc_notif_is_ready __nex_bss;
 static int notif_intid __nex_data __maybe_unused = -1;
@@ -964,6 +969,55 @@ optee_lsp_handle_direct_request(struct thread_smc_1_2_regs *args,
 		virt_unset_guest();
 }
 
+/*
+ * Dispatch an FFA_MSG_SEND_DIRECT_REQ2 arriving on OP-TEE's core endpoint to a
+ * handler registered for the request's UUID (args->a2/a3, little endian). This
+ * allows secure services to be multiplexed on the core endpoint by UUID.
+ */
+static void
+optee_lsp_handle_direct_request2(struct thread_smc_1_2_regs *args,
+				 struct sp_session *caller_sp)
+{
+	struct spmc_uuid_handler *handler = NULL;
+	uint32_t uuid_words[4] = {
+		low32_from_64(args->a2), high32_from_64(args->a2),
+		low32_from_64(args->a3), high32_from_64(args->a3),
+	};
+
+	if (caller_sp) {
+		set_simple_ret_val(args, FFA_INVALID_PARAMETERS);
+		return;
+	}
+
+	SLIST_FOREACH(handler, &uuid_handler_head, link) {
+		if (!memcmp(handler->uuid_words, uuid_words,
+			    sizeof(uuid_words))) {
+			handler->recv(args);
+			return;
+		}
+	}
+
+	set_simple_ret_val(args, FFA_INVALID_PARAMETERS);
+}
+
+TEE_Result spmc_register_uuid_handler(struct spmc_uuid_handler *handler)
+{
+	struct spmc_uuid_handler *iter = NULL;
+
+	if (!handler || !handler->recv)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	SLIST_FOREACH(iter, &uuid_handler_head, link)
+		if (!memcmp(iter->uuid_words, handler->uuid_words,
+			    sizeof(iter->uuid_words)))
+			return TEE_ERROR_ACCESS_CONFLICT;
+
+	DMSG("Adding REQ2 UUID handler \"%s\"", handler->name);
+	SLIST_INSERT_HEAD(&uuid_handler_head, handler, link);
+
+	return TEE_SUCCESS;
+}
+
 static void __maybe_unused
 optee_spmc_lsp_handle_direct_request(struct thread_smc_1_2_regs *args,
 				     struct sp_session *caller_sp)
@@ -990,6 +1044,26 @@ static void handle_direct_request(struct thread_smc_1_2_regs *args)
 
 	if (lsp) {
 		lsp->direct_req(args, NULL);
+	} else {
+		int rc = spmc_sp_start_thread(args);
+
+		/*
+		 * spmc_sp_start_thread() returns here if the SPs aren't
+		 * supported or if all threads are busy.
+		 */
+		set_simple_ret_val(args, rc);
+	}
+}
+
+static void handle_direct_request2(struct thread_smc_1_2_regs *args)
+{
+	struct spmc_lsp_desc *lsp = spmc_find_lsp_by_sp_id(FFA_DST(args->a1));
+
+	if (lsp) {
+		if (lsp->direct_req2)
+			lsp->direct_req2(args, NULL);
+		else
+			set_simple_ret_val(args, FFA_NOT_SUPPORTED);
 	} else {
 		int rc = spmc_sp_start_thread(args);
 
@@ -2033,7 +2107,7 @@ void thread_spmc_msg_recv(struct thread_smc_1_2_regs *args)
 		if (my_rxtx.ffa_vers < FFA_VERSION_1_2)
 			set_simple_ret_val(args, FFA_NOT_SUPPORTED);
 		else
-			handle_direct_request(args);
+			handle_direct_request2(args);
 		break;
 #endif
 #if defined(CFG_CORE_SEL1_SPMC)
@@ -2489,6 +2563,8 @@ static TEE_Result check_desc(struct spmc_lsp_desc *d)
 {
 	uint32_t accept_props = FFA_PART_PROP_DIRECT_REQ_RECV |
 				FFA_PART_PROP_DIRECT_REQ_SEND |
+				FFA_PART_PROP_DIRECT_REQ2_RECV |
+				FFA_PART_PROP_DIRECT_REQ2_SEND |
 				FFA_PART_PROP_NOTIF_CREATED |
 				FFA_PART_PROP_NOTIF_DESTROYED |
 				FFA_PART_PROP_AARCH64_STATE;
@@ -2511,7 +2587,7 @@ static TEE_Result check_desc(struct spmc_lsp_desc *d)
 		d->properties &= accept_props;
 	}
 
-	if (!d->direct_req) {
+	if (!d->direct_req && !d->direct_req2) {
 		EMSG("Missing direct request callback for LSP \"%s\" %#"PRIx16,
 		     d->name, d->sp_id);
 		if (!IS_ENABLED(CFG_SP_SKIP_FAILED))
@@ -2571,8 +2647,10 @@ TEE_Result spmc_register_lsp(struct spmc_lsp_desc *desc)
 static struct spmc_lsp_desc optee_core_lsp __nex_data = {
 	.name = "OP-TEE",
 	.direct_req = optee_lsp_handle_direct_request,
+	.direct_req2 = optee_lsp_handle_direct_request2,
 	.properties = FFA_PART_PROP_DIRECT_REQ_RECV |
 		      FFA_PART_PROP_DIRECT_REQ_SEND |
+		      FFA_PART_PROP_DIRECT_REQ2_RECV |
 #ifdef CFG_NS_VIRTUALIZATION
 		      FFA_PART_PROP_NOTIF_CREATED |
 		      FFA_PART_PROP_NOTIF_DESTROYED |

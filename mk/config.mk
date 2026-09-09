@@ -1411,3 +1411,30 @@ CFG_TA_LIBGCC ?= y
 # normal world.
 CFG_CORE_DYN_PROTMEM ?= n
 $(eval $(call cfg-depends-all,CFG_CORE_DYN_PROTMEM,CFG_CORE_DYN_SHM,CFG_SECURE_DATA_PATH))
+
+# virtio backend support. OP-TEE acts as the virtio device (backend) while the
+# normal world runs the virtio driver (frontend).
+#
+# CFG_VIRTIO		Core virtio device framework and split-ring engine.
+# CFG_VIRTIO_MSG		Transport-agnostic virtio-msg message codec.
+# CFG_VIRTIO_MSG_FFA	virtio-msg bound to the FF-A transport (DEN0153),
+#			dispatched by UUID on OP-TEE's core endpoint. Requires
+#			the FF-A ABI (CFG_CORE_FFA).
+# CFG_VIRTIO_VSOCK	virtio vsock device, reachable from a TA through the
+#			GlobalPlatform socket API.
+CFG_VIRTIO_MSG_FFA ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_CORE_FFA))
+
+CFG_VIRTIO_MSG ?= $(CFG_VIRTIO_MSG_FFA)
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_VIRTIO_MSG))
+
+CFG_VIRTIO ?= $(CFG_VIRTIO_MSG)
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG,CFG_VIRTIO))
+
+CFG_VIRTIO_VSOCK ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_VSOCK,CFG_VIRTIO))
+
+# CFG_VIRTIO_MSG_TEST, when enabled, embeds transport-agnostic unit tests for
+# the virtio device framework and the virtio-msg codec.
+CFG_VIRTIO_MSG_TEST ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_TEST,CFG_VIRTIO_MSG))
