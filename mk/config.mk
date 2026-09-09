@@ -1411,3 +1411,25 @@ CFG_TA_LIBGCC ?= y
 # normal world.
 CFG_CORE_DYN_PROTMEM ?= n
 $(eval $(call cfg-depends-all,CFG_CORE_DYN_PROTMEM,CFG_CORE_DYN_SHM,CFG_SECURE_DATA_PATH))
+
+# CFG_VIRTIO enables the virtio device (backend) core: vring parsing and
+# used/available ring handling. It is transport-agnostic and does not by
+# itself provide any means of communicating with a virtio driver.
+CFG_VIRTIO ?= n
+
+# CFG_VIRTIO_MSG enables the virtio-msg transport and bus layers on top of
+# CFG_VIRTIO. It implements the message-based virtio protocol (replacing MMIO
+# register access) but not any particular message carrier.
+CFG_VIRTIO_MSG ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG,CFG_VIRTIO))
+
+# CFG_VIRTIO_MSG_FFA carries virtio-msg over FF-A (Arm DEN0153). It requires
+# FF-A support and, for sending EVENT_USED to the driver, asynchronous
+# notifications.
+CFG_VIRTIO_MSG_FFA ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_VIRTIO_MSG,CFG_CORE_FFA))
+
+# CFG_VIRTIO_VSOCK provides a virtio-vsock device implemented on top of the
+# virtio device core, exposed to trusted applications through the socket API.
+CFG_VIRTIO_VSOCK ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_VSOCK,CFG_VIRTIO))
