@@ -283,28 +283,6 @@ out:
 	hdr->msg_size = sizeof(*hdr) + sizeof(*resp) + resp->byte_count;
 }
 
-static void dev_do_reset(struct virtio_dev *vdev)
-{
-	const struct virtio_dev_ops *ops = vdev->ops;
-	size_t n = 0;
-
-	for (n = 0; n < ops->vq_count; n++) {
-		struct virtio_dev_vq *vq = vdev->vqs + n;
-
-		if (vq->enabled)
-			virtio_dev_vq_disable(vq);
-		vq->callback = NULL;
-		vq->vdev = NULL;
-	}
-
-	if (ops->reset)
-		ops->reset(vdev);
-
-	memset(vdev->features, 0, sizeof(vdev->features));
-	vdev->features_ok = false;
-	vdev->status = 0;
-}
-
 static void handle_set_device_status(struct virtio_msg_hdr *hdr)
 {
 	struct virtio_msg_device_status *v = (void *)(hdr + 1);
@@ -322,7 +300,7 @@ static void handle_set_device_status(struct virtio_msg_hdr *hdr)
 
 	DMSG("v->status %#"PRIx32, v->status);
 	if (!v->status && vdev->status) {
-		dev_do_reset(vdev);
+		virtio_dev_reset(vdev);
 		goto out;
 	}
 	if (v->status & VIRTIO_DEV_STATUS_FAILED)

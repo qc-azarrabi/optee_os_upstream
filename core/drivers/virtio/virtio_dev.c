@@ -435,6 +435,36 @@ void virtio_dev_config_changed(struct virtio_dev *vdev)
 	vdev->conf_gen_count++;
 }
 
+void virtio_dev_reset(struct virtio_dev *vdev)
+{
+	const struct virtio_dev_ops *ops = vdev->ops;
+	size_t n = 0;
+
+	for (n = 0; n < ops->vq_count; n++) {
+		struct virtio_dev_vq *vq = vdev->vqs + n;
+
+		if (vq->enabled)
+			virtio_dev_vq_disable(vq);
+		vq->callback = NULL;
+		vq->vdev = NULL;
+	}
+
+	if (ops->reset)
+		ops->reset(vdev);
+
+	memset(vdev->features, 0, sizeof(vdev->features));
+	vdev->features_ok = false;
+	vdev->status = 0;
+}
+
+void virtio_dev_reset_all(void)
+{
+	struct virtio_dev *vdev = NULL;
+
+	TAILQ_FOREACH(vdev, &virtio_dev_head, link)
+		virtio_dev_reset(vdev);
+}
+
 static void atomic_virtio_notif(struct notif_driver *ndrv __unused,
 				enum notif_event ev __maybe_unused,
 				uint16_t vm_id __maybe_unused)

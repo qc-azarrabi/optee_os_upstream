@@ -992,7 +992,17 @@ optee_lsp_handle_direct_request2(struct thread_smc_1_2_regs *args,
 	SLIST_FOREACH(handler, &uuid_handler_head, link) {
 		if (!memcmp(handler->uuid_words, uuid_words,
 			    sizeof(uuid_words))) {
+			/*
+			 * The handler fills the response payload in place in
+			 * args->a4..a17. Build the RESP2 header here since it
+			 * is the same for every UUID handler: swap source and
+			 * destination endpoints and clear the UUID registers.
+			 */
 			handler->recv(args);
+			args->a0 = FFA_MSG_SEND_DIRECT_RESP2;
+			args->a1 = swap_src_dst(args->a1);
+			args->a2 = 0;
+			args->a3 = 0;
 			return;
 		}
 	}

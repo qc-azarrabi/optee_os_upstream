@@ -277,4 +277,13 @@ void vringh_complete_len(struct vringh_ctx *ctx, size_t len);
 /* Bump the config generation counter (and, in future, raise EVENT_CONFIG). */
 void virtio_dev_config_changed(struct virtio_dev *vdev);
 
+/*
+ * Reset a single device: disable and detach all its virtqueues, invoke the
+ * optional device reset op, and clear negotiated features and status.
+ */
+void virtio_dev_reset(struct virtio_dev *vdev);
+
+/* Reset every registered device (used by the transport-level RESET). */
+void virtio_dev_reset_all(void);
+
 #endif /*__DRIVERS_VIRTIO_VIRTIO_DEV_H*/
