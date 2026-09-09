@@ -201,12 +201,12 @@ static void init_resp_hdr(struct virtio_vsock_hdr *resp,
 	};
 }
 
-static void handle_op_request(struct vringh_ctx *ctx,
+static void handle_op_request(struct virtio_dev_vq_ctx *ctx,
 			      struct virtio_vsock_hdr *req)
 {
 	struct virtio_vsock_device *dev = vdev_to_vsdev(ctx->vq->vdev);
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_socket *lvvs = NULL;
 	struct virtio_vsock_socket *vvs = NULL;
 	struct virtio_vsock_hdr resp = { };
@@ -252,27 +252,28 @@ static void handle_op_request(struct vringh_ctx *ctx,
 
 	resp.buf_alloc = vvs->buf_alloc;
 out:
-	res = vringh_get_writable(rxq, &wctx, sizeof(resp));
+	res = virtio_dev_vq_get_writable(rxq, &wctx, sizeof(resp));
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		return;
 	}
 
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		return;
 	}
 
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 }
 
-static void handle_op_rw(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
+static void handle_op_rw(struct virtio_dev_vq_ctx *ctx,
+			 struct virtio_vsock_hdr *req)
 {
 	struct virtio_vsock_msg *msg = NULL;
 	struct virtio_vsock_socket *vvs = NULL;
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = { };
 	struct virtio_dev_vq *rxq = ctx->vq->vdev->vqs + VIRTIO_VSOCK_VQ_IDX_RX;
 
@@ -315,9 +316,9 @@ static void handle_op_rw(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 	msg->data.flags = req->flags & (VIRTIO_VSOCK_SEQ_EOM |
 					VIRTIO_VSOCK_SEQ_EOR);
 
-	res = vringh_pull(msg->data.buf, ctx, sizeof(*req), req->len);
+	res = virtio_dev_vq_pull(msg->data.buf, ctx, sizeof(*req), req->len);
 	if (res) {
-		DMSG("vringh_pull: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_pull: res %#"PRIx32, res);
 		free(msg->data.buf);
 		free(msg);
 		goto err;
@@ -333,36 +334,36 @@ static void handle_op_rw(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 
 err:
 	init_resp_hdr(&resp, req, VIRTIO_VSOCK_OP_RST);
-	res = vringh_get_writable(rxq, &wctx, sizeof(resp));
+	res = virtio_dev_vq_get_writable(rxq, &wctx, sizeof(resp));
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		return;
 	}
 
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		return;
 	}
 
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 }
 
-static void handle_op_shutdown(struct vringh_ctx *ctx,
+static void handle_op_shutdown(struct virtio_dev_vq_ctx *ctx,
 			       struct virtio_vsock_hdr *req)
 {
 	struct virtio_vsock_socket *vvs = NULL;
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = { };
 	struct virtio_dev_vq *rxq = ctx->vq->vdev->vqs + VIRTIO_VSOCK_VQ_IDX_RX;
 
 	init_resp_hdr(&resp, req, VIRTIO_VSOCK_OP_SHUTDOWN);
 	resp.flags = BIT(VIRTIO_VSOCK_SHUTDOWN_F_RECEIVE) |
 		     BIT(VIRTIO_VSOCK_SHUTDOWN_F_SEND);
-	res = vringh_get_writable(rxq, &wctx, sizeof(resp));
+	res = virtio_dev_vq_get_writable(rxq, &wctx, sizeof(resp));
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		return;
 	}
 
@@ -377,13 +378,13 @@ static void handle_op_shutdown(struct vringh_ctx *ctx,
 	vvs->dead = true;
 
 out:
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		return;
 	}
 
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 }
 
 static void handle_op_credit_update(struct virtio_vsock_hdr *req)
@@ -398,19 +399,19 @@ static void handle_op_credit_update(struct virtio_vsock_hdr *req)
 	}
 }
 
-static void handle_op_credit_request(struct vringh_ctx *ctx,
+static void handle_op_credit_request(struct virtio_dev_vq_ctx *ctx,
 				     struct virtio_vsock_hdr *req)
 {
 	struct virtio_vsock_socket *vvs = NULL;
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = { };
 	struct virtio_dev_vq *rxq = ctx->vq->vdev->vqs + VIRTIO_VSOCK_VQ_IDX_RX;
 
 	init_resp_hdr(&resp, req, VIRTIO_VSOCK_OP_CREDIT_UPDATE);
-	res = vringh_get_writable(rxq, &wctx, sizeof(resp));
+	res = virtio_dev_vq_get_writable(rxq, &wctx, sizeof(resp));
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		return;
 	}
 
@@ -429,27 +430,28 @@ static void handle_op_credit_request(struct vringh_ctx *ctx,
 	resp.fwd_cnt = vvs->fwd_cnt;
 
 out:
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		return;
 	}
 
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 }
 
-static void handle_op_rst(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
+static void handle_op_rst(struct virtio_dev_vq_ctx *ctx,
+			  struct virtio_vsock_hdr *req)
 {
 	struct virtio_vsock_socket *vvs = NULL;
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = { };
 	struct virtio_dev_vq *rxq = ctx->vq->vdev->vqs + VIRTIO_VSOCK_VQ_IDX_RX;
 
 	init_resp_hdr(&resp, req, VIRTIO_VSOCK_OP_RST);
-	res = vringh_get_writable(rxq, &wctx, sizeof(resp));
+	res = virtio_dev_vq_get_writable(rxq, &wctx, sizeof(resp));
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		return;
 	}
 
@@ -460,23 +462,23 @@ static void handle_op_rst(struct vringh_ctx *ctx, struct virtio_vsock_hdr *req)
 		vvs->dead = true;
 	}
 
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		return;
 	}
 
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 }
 
-static void handle_rx_payload(struct vringh_ctx *ctx)
+static void handle_rx_payload(struct virtio_dev_vq_ctx *ctx)
 {
 	struct virtio_vsock_hdr hdr = { };
 	TEE_Result res = TEE_SUCCESS;
 
-	res = vringh_pull(&hdr, ctx, 0, sizeof(hdr));
+	res = virtio_dev_vq_pull(&hdr, ctx, 0, sizeof(hdr));
 	if (res) {
-		DMSG("vringh_pull: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_pull: res %#"PRIx32, res);
 		return;
 	}
 	FMSG("src_cid %#"PRIx64" dst_cid %#"PRIx64,
@@ -524,20 +526,20 @@ static void handle_rx_payload(struct vringh_ctx *ctx)
  */
 static void vsock_vq_tx_callback(struct virtio_dev_vq *vq)
 {
-	struct vringh_ctx ctx = { };
+	struct virtio_dev_vq_ctx ctx = { };
 
 	DMSG("idx %u", vq->vq_id);
 
-	while (!vringh_get_avail(vq, &ctx)) {
+	while (!virtio_dev_vq_get_avail(vq, &ctx)) {
 		handle_rx_payload(&ctx);
-		vringh_complete(&ctx);
+		virtio_dev_vq_complete(&ctx);
 	}
 }
 
 static bool reply_op(struct virtio_dev_vq *vq, struct virtio_vsock_socket *vvs,
 		     uint16_t op)
 {
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = {
 		/*
 		 * Device->driver messages put the host (device) side as the
@@ -555,11 +557,11 @@ static bool reply_op(struct virtio_dev_vq *vq, struct virtio_vsock_socket *vvs,
 		.fwd_cnt = vvs->fwd_cnt,
 	};
 
-	if (vringh_get_writable(vq, &wctx, sizeof(resp)))
+	if (virtio_dev_vq_get_writable(vq, &wctx, sizeof(resp)))
 		return false;
-	if (vringh_push(&resp, &wctx, 0, sizeof(resp)))
+	if (virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp)))
 		return false;
-	vringh_complete_len(&wctx, sizeof(resp));
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp));
 
 	return true;
 }
@@ -846,7 +848,7 @@ TEE_Result virtio_vsock_send(struct virtio_vsock_socket *vvs, const void *buf,
 			     size_t *blen, uint32_t flags, uint32_t timeout)
 {
 	TEE_Result res = TEE_SUCCESS;
-	struct vringh_ctx wctx = { };
+	struct virtio_dev_vq_ctx wctx = { };
 	struct virtio_vsock_hdr resp = {
 		.src_cid = vvs->dst_cid,
 		.dst_cid = vvs->src_cid,
@@ -875,28 +877,29 @@ TEE_Result virtio_vsock_send(struct virtio_vsock_socket *vvs, const void *buf,
 	if (flags && sz == *blen)
 		resp.flags = flags;
 
-	res = vringh_get_writable(vvs->dev->vdev.vqs + VIRTIO_VSOCK_VQ_IDX_RX,
-				  &wctx, sizeof(resp) + sz);
+	res = virtio_dev_vq_get_writable(vvs->dev->vdev.vqs +
+					 VIRTIO_VSOCK_VQ_IDX_RX,
+					 &wctx, sizeof(resp) + sz);
 	if (res) {
-		DMSG("vringh_get_writable: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_get_writable: res %#"PRIx32, res);
 		goto out;
 	}
 
-	res = vringh_push(&resp, &wctx, 0, sizeof(resp));
+	res = virtio_dev_vq_push(&resp, &wctx, 0, sizeof(resp));
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		goto out;
 	}
 
-	res = vringh_push(buf, &wctx, sizeof(resp), sz);
+	res = virtio_dev_vq_push(buf, &wctx, sizeof(resp), sz);
 	if (res) {
-		DMSG("vringh_push: res %#"PRIx32, res);
+		DMSG("virtio_dev_vq_push: res %#"PRIx32, res);
 		goto out;
 	}
 
 	vvs->local_tx_cnt += sz;
 	*blen = sz;
-	vringh_complete_len(&wctx, sizeof(resp) + sz);
+	virtio_dev_vq_complete_len(&wctx, sizeof(resp) + sz);
 out:
 	mutex_unlock(&sock_lock);
 

@@ -120,15 +120,15 @@ struct virtio_dev_vq {
 };
 
 /*
- * struct vringh_ctx - host-side ring accessor context.
+ * struct virtio_dev_vq_ctx - device-side ring accessor context.
  *
- * A single avail-ring head flows through the vringh_* accessors and is
+ * A single avail-ring head flows through the virtio_dev_vq_* accessors and is
  * retired to the used ring exactly once. The read/write helpers operate on
  * *uni-directional* descriptor chains (a chain is either all device-readable
  * or all device-writable); a head is retired by exactly one of
- * vringh_complete() after either the read or the write side.
+ * virtio_dev_vq_complete() after either the read or the write side.
  */
-struct vringh_ctx {
+struct virtio_dev_vq_ctx {
 	struct virtio_dev_vq *vq;
 	uint16_t avail_idx;
 	uint16_t first_desc_idx;
@@ -254,25 +254,34 @@ TEE_Result virtio_dev_setup_vq(struct virtio_dev *vdev, size_t idx,
 			       uint64_t drv_ba, uint64_t dev_ba);
 
 /*
- * Host-side split-ring accessors (vringh_*).
+ * Device-side split-ring accessors (virtio_dev_vq_*).
  *
- * These operate on uni-directional descriptor chains; see struct vringh_ctx.
- * Read side (driver -> device): vringh_get_avail() claims a head,
- * vringh_pull() copies bytes out of the chain, vringh_complete() retires it.
- * Write side (device -> driver): vringh_get_writable() claims a head,
- * vringh_push() copies bytes into the chain, vringh_complete_len() retires it
- * with the written length.
+ * The device (OP-TEE backend) consumes the driver's avail ring and produces the
+ * used ring, i.e. the role Linux's vringh serves for a vhost/vDPA host; OP-TEE
+ * runs at S-EL1 rather than as a hypervisor host, so these are named for the
+ * virtio *device* side instead.
+ *
+ * These operate on uni-directional descriptor chains; see
+ * struct virtio_dev_vq_ctx.
+ * Read side (driver -> device): virtio_dev_vq_get_avail() claims a head,
+ * virtio_dev_vq_pull() copies bytes out of the chain, virtio_dev_vq_complete()
+ * retires it.
+ * Write side (device -> driver): virtio_dev_vq_get_writable() claims a head,
+ * virtio_dev_vq_push() copies bytes into the chain,
+ * virtio_dev_vq_complete_len() retires it with the written length.
  */
-TEE_Result vringh_get_avail(struct virtio_dev_vq *vq, struct vringh_ctx *ctx);
-TEE_Result vringh_pull(void *addr, struct vringh_ctx *ctx, size_t offs,
-		       size_t len);
-void vringh_complete(struct vringh_ctx *ctx);
+TEE_Result virtio_dev_vq_get_avail(struct virtio_dev_vq *vq,
+				   struct virtio_dev_vq_ctx *ctx);
+TEE_Result virtio_dev_vq_pull(void *addr, struct virtio_dev_vq_ctx *ctx,
+			      size_t offs, size_t len);
+void virtio_dev_vq_complete(struct virtio_dev_vq_ctx *ctx);
 
-TEE_Result vringh_get_writable(struct virtio_dev_vq *vq, struct vringh_ctx *ctx,
-			       size_t max_len);
-TEE_Result vringh_push(const void *addr, struct vringh_ctx *ctx, size_t offs,
-		       size_t len);
-void vringh_complete_len(struct vringh_ctx *ctx, size_t len);
+TEE_Result virtio_dev_vq_get_writable(struct virtio_dev_vq *vq,
+				      struct virtio_dev_vq_ctx *ctx,
+				      size_t max_len);
+TEE_Result virtio_dev_vq_push(const void *addr, struct virtio_dev_vq_ctx *ctx,
+			      size_t offs, size_t len);
+void virtio_dev_vq_complete_len(struct virtio_dev_vq_ctx *ctx, size_t len);
 
 /* Bump the config generation counter (and, in future, raise EVENT_CONFIG). */
 void virtio_dev_config_changed(struct virtio_dev *vdev);

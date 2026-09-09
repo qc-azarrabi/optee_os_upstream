@@ -2,8 +2,9 @@
 /*
  * Copyright (c) 2026, Qualcomm Innovation Center, Inc.
  *
- * Backend (device-side) virtio core: device registry, host-side split-ring
- * accessors (vringh_*), default feature negotiation and virtqueue setup, and
+ * Backend (device-side) virtio core: device registry, device-side split-ring
+ * accessors (virtio_dev_vq_*), default feature negotiation and virtqueue
+ * setup, and
  * the notification bottom-half that drives virtqueue callbacks. Transport- and
  * architecture-agnostic: all bus-address translation goes through
  * struct virtio_transport_ops stored per virtqueue.
@@ -264,14 +265,15 @@ TEE_Result virtio_dev_setup_vq(struct virtio_dev *vdev, size_t idx,
 	return res;
 }
 
-TEE_Result vringh_get_avail(struct virtio_dev_vq *vq, struct vringh_ctx *ctx)
+TEE_Result virtio_dev_vq_get_avail(struct virtio_dev_vq *vq,
+				   struct virtio_dev_vq_ctx *ctx)
 {
 	if (vq->avail_idx == vq->driver->idx)
 		return TEE_ERROR_ITEM_NOT_FOUND;
 
 	FMSG("vq id %u vq->avail_idx %u vq->driver->idx %u",
 	     vq->vq_id, vq->avail_idx, vq->driver->idx);
-	*ctx = (struct vringh_ctx){
+	*ctx = (struct virtio_dev_vq_ctx){
 		.vq = vq,
 		.avail_idx = vq->avail_idx,
 		.first_desc_idx = vq->driver->ring[vq->avail_idx %
@@ -281,8 +283,8 @@ TEE_Result vringh_get_avail(struct virtio_dev_vq *vq, struct vringh_ctx *ctx)
 	return TEE_SUCCESS;
 }
 
-TEE_Result vringh_pull(void *addr, struct vringh_ctx *ctx, size_t offs,
-		       size_t len)
+TEE_Result virtio_dev_vq_pull(void *addr, struct virtio_dev_vq_ctx *ctx,
+			      size_t offs, size_t len)
 {
 	size_t desc_idx = ctx->first_desc_idx;
 	struct virtio_dev_vq *vq = ctx->vq;
@@ -331,7 +333,7 @@ TEE_Result vringh_pull(void *addr, struct vringh_ctx *ctx, size_t offs,
 	}
 }
 
-void vringh_complete(struct vringh_ctx *ctx)
+void virtio_dev_vq_complete(struct virtio_dev_vq_ctx *ctx)
 {
 	struct virtio_dev_vq *vq = ctx->vq;
 	struct virtq_used *used = vq->device;
@@ -348,15 +350,16 @@ void vringh_complete(struct vringh_ctx *ctx)
 	ctx->vq = NULL;
 }
 
-TEE_Result vringh_get_writable(struct virtio_dev_vq *vq, struct vringh_ctx *ctx,
-			       size_t max_len __unused)
+TEE_Result virtio_dev_vq_get_writable(struct virtio_dev_vq *vq,
+				      struct virtio_dev_vq_ctx *ctx,
+				      size_t max_len __unused)
 {
 	if (vq->avail_idx == vq->driver->idx)
 		return TEE_ERROR_ITEM_NOT_FOUND;
 
 	FMSG("vq id %u vq->avail_idx %u vq->driver->idx %u",
 	     vq->vq_id, vq->avail_idx, vq->driver->idx);
-	*ctx = (struct vringh_ctx){
+	*ctx = (struct virtio_dev_vq_ctx){
 		.vq = vq,
 		.avail_idx = vq->avail_idx,
 		.first_desc_idx = vq->driver->ring[vq->avail_idx %
@@ -366,8 +369,8 @@ TEE_Result vringh_get_writable(struct virtio_dev_vq *vq, struct vringh_ctx *ctx,
 	return TEE_SUCCESS;
 }
 
-TEE_Result vringh_push(const void *addr, struct vringh_ctx *ctx, size_t offs,
-		       size_t len)
+TEE_Result virtio_dev_vq_push(const void *addr, struct virtio_dev_vq_ctx *ctx,
+			      size_t offs, size_t len)
 {
 	size_t desc_idx = ctx->first_desc_idx;
 	struct virtio_dev_vq *vq = ctx->vq;
@@ -413,7 +416,7 @@ TEE_Result vringh_push(const void *addr, struct vringh_ctx *ctx, size_t offs,
 	}
 }
 
-void vringh_complete_len(struct vringh_ctx *ctx, size_t len)
+void virtio_dev_vq_complete_len(struct virtio_dev_vq_ctx *ctx, size_t len)
 {
 	struct virtio_dev_vq *vq = ctx->vq;
 	struct virtq_used *used = vq->device;
