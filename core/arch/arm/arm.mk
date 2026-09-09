@@ -154,6 +154,10 @@ $(error CFG_CORE_FFA depends on CFG_ARM64_core)
 endif
 endif
 
+# virtio-msg over FF-A (DEN0153) requires the FF-A ABI. Checked here rather
+# than in mk/config.mk because CFG_CORE_FFA is forced above, after config.mk.
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_CORE_FFA))
+
 ifeq ($(CFG_CORE_PHYS_RELOCATABLE)-$(CFG_WITH_PAGER),y-y)
 $(error CFG_CORE_PHYS_RELOCATABLE and CFG_WITH_PAGER are not compatible)
 endif

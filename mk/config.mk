@@ -1423,7 +1423,6 @@ $(eval $(call cfg-depends-all,CFG_CORE_DYN_PROTMEM,CFG_CORE_DYN_SHM,CFG_SECURE_D
 # CFG_VIRTIO_VSOCK	virtio vsock device, reachable from a TA through the
 #			GlobalPlatform socket API.
 CFG_VIRTIO_MSG_FFA ?= n
-$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_CORE_FFA))
 
 CFG_VIRTIO_MSG ?= $(CFG_VIRTIO_MSG_FFA)
 $(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_VIRTIO_MSG))
