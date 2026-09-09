@@ -11,11 +11,23 @@
 #include <util.h>
 
 /*
+ * This core is a port of the QTEE vhost backend. Guest ring memory is already
+ * mapped by the transport, so the QTEE guest-copy helpers reduce to memcpy and
+ * the release/acquire barriers to dsb(). Feature sets fit in 64 bits, so a
+ * plain uint64_t replaces the QTEE virtio_features_t bitset.
+ */
+
+static bool vdevice_has_feat(struct vdevice *vdev, int bit)
+{
+	return vdev->features_neg & BIT64(bit);
+}
+
+/*
  * vring_need_event() - has the used index crossed the driver's event index?
  *
  * The algorithm from the virtio specification (VIRTIO_F_EVENT_IDX): returns
  * true when @new_idx has passed @event_idx since @old_idx, using wrapping
- * unsigned 16-bit arithmetic.
+ * unsigned 16-bit arithmetic. Only meaningful when EVENT_IDX is negotiated.
  */
 static bool vring_need_event(uint16_t event_idx, uint16_t new_idx,
 			     uint16_t old_idx)
@@ -32,6 +44,113 @@ static struct vdevice_vq *vdevice_get_vq(struct vdevice *vdev, int qid)
 	return &vdev->vqs[qid];
 }
 
+/*
+ * Split-ring accessors. The ring pointers are host-accessible (mapped by the
+ * transport); these wrap the accesses so ordering and the used_event /
+ * avail_event trailing fields live in one place.
+ */
+static uint16_t vdevice_get_avail_flags(struct vdevice_vq *vq)
+{
+	return vq->avail->flags;
+}
+
+static uint16_t vdevice_get_avail_entry(struct vdevice_vq *vq, uint16_t i)
+{
+	return vq->avail->ring[i];
+}
+
+/* used_event follows avail->ring[queue_size] (virtio split-ring layout) */
+static uint16_t vdevice_get_used_event(struct vdevice_vq *vq)
+{
+	return vq->avail->ring[vq->num];
+}
+
+static void vdevice_put_used_flags(struct vdevice_vq *vq, uint16_t flags)
+{
+	vq->used->flags = flags;
+}
+
+static void vdevice_put_used_idx(struct vdevice_vq *vq, uint16_t idx)
+{
+	vq->used->idx = idx;
+}
+
+static void vdevice_put_used_entry(struct vdevice_vq *vq, uint16_t i,
+				   struct virtq_used_elem *el)
+{
+	vq->used->ring[i] = *el;
+}
+
+/* avail_event follows used->ring[queue_size] (virtio split-ring layout) */
+static void vdevice_put_avail_event(struct vdevice_vq *vq, uint16_t ev)
+{
+	memcpy(&vq->used->ring[vq->num], &ev, sizeof(ev));
+}
+
+static struct virtq_desc vdevice_get_desc(struct vdevice_vq *vq, uint16_t i)
+{
+	return vq->desc[i];
+}
+
+static struct virtq_desc vdevice_get_indirect_desc(struct virtq_desc *table,
+						   uint16_t i)
+{
+	return table[i];
+}
+
+static void *vdevice_map_guest(struct vdevice_vq *vq, uint64_t dma_addr,
+			       size_t size)
+{
+	if (!vq->dma.map)
+		return NULL;
+
+	return vq->dma.map(vq->dma.cookie, dma_addr, size);
+}
+
+static void vdevice_unmap_guest(struct vdevice_vq *vq, void *addr, size_t size)
+{
+	if (vq->dma.unmap)
+		vq->dma.unmap(vq->dma.cookie, addr, size);
+}
+
+/* Copy @len bytes from a guest DMA address into a host buffer */
+static int vdevice_copy_from_guest_dma(struct vdevice_vq *vq, void *dst,
+				       uint64_t src_dma, size_t len)
+{
+	void *ptr = NULL;
+
+	if (!len)
+		return 0;
+
+	ptr = vdevice_map_guest(vq, src_dma, len);
+	if (!ptr)
+		return -1;
+
+	memcpy(dst, ptr, len);
+	vdevice_unmap_guest(vq, ptr, len);
+
+	return 0;
+}
+
+/* Copy @len bytes from a host buffer into a guest DMA address */
+static int vdevice_copy_to_guest_dma(struct vdevice_vq *vq, uint64_t dst_dma,
+				     const void *src, size_t len)
+{
+	void *ptr = NULL;
+
+	if (!len)
+		return 0;
+
+	ptr = vdevice_map_guest(vq, dst_dma, len);
+	if (!ptr)
+		return -1;
+
+	memcpy(ptr, src, len);
+	vdevice_unmap_guest(vq, ptr, len);
+
+	return 0;
+}
+
 void vdevice_init(struct vdevice *vdev, struct vdevice_vq *vqs, int num_queues,
 		  const struct vdevice_ops *ops)
 {
@@ -42,6 +161,13 @@ void vdevice_init(struct vdevice *vdev, struct vdevice_vq *vqs, int num_queues,
 	vdev->vqs = vqs;
 	vdev->status = 0;
 	vdev->started = false;
+
+	/* Core default features; device-specific bits are added by the
+	 * transport via ops->get_features().
+	 */
+	vdev->features = BIT64(VDEVICE_F_INDIRECT_DESC) |
+			 BIT64(VDEVICE_F_EVENT_IDX) |
+			 BIT64(VDEVICE_F_VERSION_1);
 	vdev->features_neg = 0;
 
 	memset(vqs, 0, num_queues * sizeof(*vqs));
@@ -49,10 +175,34 @@ void vdevice_init(struct vdevice *vdev, struct vdevice_vq *vqs, int num_queues,
 		vqs[n].qid = n;
 		vqs[n].lock = SPINLOCK_UNLOCK;
 	}
+}
 
-	vdev->features = 0;
-	if (ops->get_features)
-		ops->get_features(vdev, &vdev->features);
+int vdevice_check_features(struct vdevice *vdev __unused, uint64_t features)
+{
+	int bit = 0;
+
+	/* Always require VIRTIO_F_VERSION_1 */
+	if (!(features & BIT64(VDEVICE_F_VERSION_1)))
+		return -1;
+
+	for (bit = VDEVICE_F_START; bit < VDEVICE_F_END; bit++) {
+		switch (bit) {
+		/* Supported device-independent features */
+		case VDEVICE_F_INDIRECT_DESC:
+		case VDEVICE_F_EVENT_IDX:
+		case VDEVICE_F_VERSION_1:
+		case VDEVICE_F_ACCESS_PLATFORM:
+		case VDEVICE_F_IN_ORDER:
+		case VDEVICE_F_RING_RESET:
+			break;
+		default:
+			/* Reject any reserved bit we do not implement */
+			if (features & BIT64(bit))
+				return -1;
+		}
+	}
+
+	return 0;
 }
 
 uint8_t vdevice_status_read(struct vdevice *vdev)
@@ -60,58 +210,120 @@ uint8_t vdevice_status_read(struct vdevice *vdev)
 	return vdev->status;
 }
 
+/* Reset all per-queue state (see vdevice_reset_queue for the device-type part) */
+static void vdevice_vq_reset(struct vdevice_vq *vq)
+{
+	vq->ready = false;
+
+	vq->f_version_1 = false;
+	vq->f_event_idx = false;
+	vq->f_indirect = false;
+	vq->f_in_order = false;
+	vq->f_reset_vq = false;
+
+	vq->last_avail_idx = 0;
+	vq->last_used_idx = 0;
+	vq->last_signalled_used_idx = 0;
+	vq->used_flags = 0;
+	vq->avail_idx = 0;
+
+	vq->desc = NULL;
+	vq->avail = NULL;
+	vq->used = NULL;
+	vq->num = 0;
+	vq->desc_ba = 0;
+	vq->avail_ba = 0;
+	vq->used_ba = 0;
+}
+
+static void vdevice_stop(struct vdevice *vdev)
+{
+	if (vdev->started && vdev->ops->stop)
+		vdev->ops->stop(vdev);
+	vdev->started = false;
+}
+
+static void vdevice_reset(struct vdevice *vdev)
+{
+	int n = 0;
+
+	vdevice_stop(vdev);
+	for (n = 0; n < vdev->num_queues; n++)
+		vdevice_vq_reset(&vdev->vqs[n]);
+
+	vdev->features_neg = 0;
+	vdev->status = 0;
+}
+
+static int vdevice_start(struct vdevice *vdev)
+{
+	int res = 0;
+
+	if (vdev->started)
+		return 0;
+
+	if (vdev->ops->start) {
+		res = vdev->ops->start(vdev);
+		if (res)
+			return res;
+	}
+	vdev->started = true;
+
+	return 0;
+}
+
 int vdevice_status_write(struct vdevice *vdev, uint8_t status)
 {
 	uint8_t old = vdev->status;
-	int n = 0;
-	int res = 0;
 
-	/*
-	 * A write of 0 is a device reset (virtio spec "Device
-	 * Initialization"). Stop the device and reset every queue. This must
-	 * not panic: the driver may reset at any time.
-	 */
-	if (status == 0) {
-		if (vdev->started && vdev->ops->stop)
-			vdev->ops->stop(vdev);
-		vdev->started = false;
-		for (n = 0; n < vdev->num_queues; n++)
-			vdevice_reset_queue(vdev, n);
-		vdev->features_neg = 0;
-		vdev->status = 0;
+	/* See the virtio spec "Device Initialization" for the transitions */
+
+	/* A write of 0 is a clean device reset; must not panic */
+	if (!status) {
+		vdevice_reset(vdev);
+		return 0;
+	}
+
+	/* Already FAILED: accept no further change until reset */
+	if (old & VDEVICE_STATUS_FAILED)
+		return -1;
+
+	/* The driver cannot set NEEDS_RESET */
+	if (status & VDEVICE_STATUS_NEEDS_RESET)
+		return -1;
+
+	if (status & VDEVICE_STATUS_FAILED) {
+		/* Latch FAILED and stop; wait for reset */
+		vdev->status |= VDEVICE_STATUS_FAILED;
+		vdevice_stop(vdev);
 		return 0;
 	}
 
 	/* Status bits are only ever set, never cleared (except by reset) */
-	if ((old & status) != old) {
+	if ((status & old) != old) {
 		EMSG("Illegal status transition %#"PRIx8" -> %#"PRIx8,
 		     old, status);
 		return -1;
 	}
 
-	/* Driver just set FEATURES_OK: latch the negotiated features */
+	/* FEATURES_OK requires VERSION_1 among the negotiated features */
 	if ((status & VDEVICE_STATUS_FEATURES_OK) &&
 	    !(old & VDEVICE_STATUS_FEATURES_OK)) {
-		if (vdev->ops->finalize_features) {
-			res = vdev->ops->finalize_features(vdev,
-							   vdev->features_neg);
-			if (res)
-				return res;
-		}
+		if (!vdevice_has_feat(vdev, VDEVICE_F_VERSION_1))
+			return -1;
 	}
 
-	/* Driver just set DRIVER_OK: bring the device live */
+	/* DRIVER_OK only after FEATURES_OK */
 	if ((status & VDEVICE_STATUS_DRIVER_OK) &&
-	    !(old & VDEVICE_STATUS_DRIVER_OK)) {
-		if (vdev->ops->start) {
-			res = vdev->ops->start(vdev);
-			if (res)
-				return res;
-		}
-		vdev->started = true;
-	}
+	    !(status & VDEVICE_STATUS_FEATURES_OK))
+		return -1;
 
 	vdev->status = status;
+
+	/* Bring the device live on the DRIVER_OK edge */
+	if ((status & VDEVICE_STATUS_DRIVER_OK) &&
+	    !(old & VDEVICE_STATUS_DRIVER_OK))
+		vdevice_start(vdev);
 
 	return 0;
 }
@@ -122,9 +334,17 @@ int vdevice_set_ring(struct vdevice *vdev, int qid, void *desc, void *avail,
 {
 	struct vdevice_vq *vq = vdevice_get_vq(vdev, qid);
 
-	if (!vq)
+	if (!vq || !desc || !avail || !used || !num)
 		return -1;
-	if (!num || !IS_POWER_OF_TWO(num))
+	if (!IS_POWER_OF_TWO(num))
+		return -1;
+
+	/* Must be at FEATURES_OK so the negotiated features are final */
+	if (!(vdev->status & VDEVICE_STATUS_FEATURES_OK))
+		return -1;
+
+	/* Do not (re)program a running queue */
+	if (vq->ready)
 		return -1;
 
 	vq->desc = desc;
@@ -135,20 +355,33 @@ int vdevice_set_ring(struct vdevice *vdev, int qid, void *desc, void *avail,
 	vq->used_ba = used_ba;
 	vq->num = num;
 
-	vq->last_avail_idx = 0;
-	vq->last_used_idx = 0;
-	vq->signalled_used_valid = false;
+	/* Seed index and cache state from the guest rings */
+	dsb();
+	vq->avail_idx = vq->avail->idx;
+	vq->last_avail_idx = vq->avail->idx;
+	vq->last_used_idx = vq->used->idx;
+	vq->last_signalled_used_idx = vq->used->idx;
+	vq->used_flags = vq->used->flags;
 
-	vq->f_event_idx = vdev->features_neg & BIT64(VDEVICE_F_EVENT_IDX);
-	vq->f_indirect = vdev->features_neg & BIT64(VDEVICE_F_INDIRECT_DESC);
-	vq->f_in_order = vdev->features_neg & BIT64(VDEVICE_F_IN_ORDER);
+	/* Cache negotiated features for the queue fast paths */
+	vq->f_version_1 = vdevice_has_feat(vdev, VDEVICE_F_VERSION_1);
+	vq->f_event_idx = vdevice_has_feat(vdev, VDEVICE_F_EVENT_IDX);
+	vq->f_indirect = vdevice_has_feat(vdev, VDEVICE_F_INDIRECT_DESC);
+	vq->f_in_order = vdevice_has_feat(vdev, VDEVICE_F_IN_ORDER);
+	vq->f_reset_vq = vdevice_has_feat(vdev, VDEVICE_F_RING_RESET);
 
 	return 0;
 }
 
 void vdevice_set_ring_ready(struct vdevice_vq *vq, bool ready)
 {
-	vq->ready = ready;
+	uint32_t exceptions = cpu_spin_lock_xsave(&vq->lock);
+
+	/* A zero-size queue is never worth enabling */
+	if (vq->num)
+		vq->ready = ready;
+
+	cpu_spin_unlock_xrestore(&vq->lock, exceptions);
 }
 
 int vdevice_reset_queue(struct vdevice *vdev, int qid)
@@ -158,176 +391,354 @@ int vdevice_reset_queue(struct vdevice *vdev, int qid)
 	if (!vq)
 		return -1;
 
+	/* Only valid when VIRTIO_F_RING_RESET was negotiated */
+	if (!vq->f_reset_vq)
+		return -1;
+
+	vdevice_set_ring_ready(vq, false);
 	if (vdev->ops->reset_vq)
 		vdev->ops->reset_vq(vdev, vq);
-
-	vq->ready = false;
-	vq->desc = NULL;
-	vq->avail = NULL;
-	vq->used = NULL;
-	vq->num = 0;
-	vq->last_avail_idx = 0;
-	vq->last_used_idx = 0;
-	vq->signalled_used_valid = false;
+	vdevice_vq_reset(vq);
 
 	return 0;
 }
 
 /*
- * Append one descriptor's buffer to the readable or writable sglist depending
- * on VIRTQ_DESC_F_WRITE. Returns 0 on success or -1 if a list would overflow.
+ * Read and validate avail->idx. Returns 0 if new entries are available, 1 if
+ * the ring is empty, or -1 if the index is out of the ring-size bound.
  */
-static int vdevice_sg_add(struct vdevice_chain *chain,
-			  const struct virtq_desc *d)
+static int vdevice_get_avail_idx(struct vdevice_vq *vq)
 {
-	struct vdevice_sglist *sgl = NULL;
+	vq->avail_idx = vq->avail->idx;
 
-	if (d->flags & VIRTQ_DESC_F_WRITE)
-		sgl = &chain->in;
-	else
-		sgl = &chain->out;
-
-	if (sgl->num >= VDEVICE_MAX_DESC_CHAIN)
+	if ((uint16_t)(vq->avail_idx - vq->last_avail_idx) > vq->num)
 		return -1;
 
-	sgl->sg[sgl->num].addr = d->addr;
-	sgl->sg[sgl->num].len = d->len;
-	sgl->num++;
-	sgl->total += d->len;
+	if (vq->avail_idx == vq->last_avail_idx)
+		return 1;
+
+	/* avail_idx advanced: acquire the entries the driver published */
+	dsb();
+
+	return 0;
+}
+
+/* Fetch descriptor @idx from the main table (@table NULL) or an indirect one */
+static int vdevice_chain_get_desc(struct vdevice_vq *vq,
+				  struct virtq_desc *table, uint16_t limit,
+				  uint16_t idx, struct virtq_desc *desc)
+{
+	if (idx >= limit)
+		return -1;
+
+	if (table)
+		*desc = vdevice_get_indirect_desc(table, idx);
+	else
+		*desc = vdevice_get_desc(vq, idx);
+
+	return 0;
+}
+
+/*
+ * Walk a descriptor chain starting at @start in the table (@table, @limit) and
+ * append each buffer into vq->sgs, enforcing the split-ring rule that all
+ * device-readable (OUT) descriptors precede device-writable (IN) ones. A direct
+ * chain may end in a single INDIRECT descriptor, which is recursed into once.
+ * @out/@in/@sgs_idx accumulate across the (single) recursion.
+ */
+static int vdevice_chain_accum(struct vdevice_vq *vq, uint16_t start,
+			       struct virtq_desc *table, uint16_t limit,
+			       uint16_t *out, uint16_t *in, uint16_t *sgs_idx)
+{
+	uint16_t idx = start;
+	struct virtq_desc desc;
+	int res = 0;
+
+	for (;;) {
+		if (*sgs_idx >= VDEVICE_MAX_DESC_CHAIN)
+			return -1;
+
+		res = vdevice_chain_get_desc(vq, table, limit, idx, &desc);
+		if (res)
+			return res;
+
+		if (desc.flags & VIRTQ_DESC_F_INDIRECT) {
+			struct virtq_desc *tbl = NULL;
+			uint16_t nent = 0;
+
+			/* No nested indirect tables */
+			if (table)
+				return -1;
+			/* An indirect desc must terminate the direct chain */
+			if (desc.flags & VIRTQ_DESC_F_NEXT)
+				return -1;
+			if (!vq->f_indirect)
+				return -1;
+			if (!desc.len || desc.len % sizeof(struct virtq_desc))
+				return -1;
+			if (desc.addr & (VRING_DESC_ALIGN_SIZE - 1))
+				return -1;
+
+			tbl = vdevice_map_guest(vq, desc.addr, desc.len);
+			if (!tbl)
+				return -1;
+
+			nent = desc.len / sizeof(struct virtq_desc);
+			/* Recurse once; the nested call ends via the "no
+			 * nested indirect" check above.
+			 */
+			res = vdevice_chain_accum(vq, 0, tbl, nent, out, in,
+						  sgs_idx);
+			vdevice_unmap_guest(vq, tbl, desc.len);
+
+			return res;
+		}
+
+		if (desc.flags & VIRTQ_DESC_F_WRITE) {
+			/* Device-writable (driver IN) */
+			vq->sgs[*sgs_idx].addr = desc.addr;
+			vq->sgs[*sgs_idx].len = desc.len;
+			(*in)++;
+		} else {
+			/* Device-readable (driver OUT), must precede any IN */
+			if (*in)
+				return -1;
+			vq->sgs[*sgs_idx].addr = desc.addr;
+			vq->sgs[*sgs_idx].len = desc.len;
+			(*out)++;
+		}
+
+		(*sgs_idx)++;
+		if (!(desc.flags & VIRTQ_DESC_F_NEXT))
+			break;
+		idx = desc.next;
+	}
 
 	return 0;
 }
 
 int vdevice_get_vq_desc(struct vdevice_vq *vq, struct vdevice_chain *chain)
 {
-	struct virtq_desc *desc = vq->desc;
-	uint16_t avail_idx = 0;
+	uint16_t out_n = 0;
+	uint16_t in_n = 0;
+	uint16_t sgs_idx = 0;
 	uint16_t head = 0;
 	uint16_t idx = 0;
-	unsigned int count = 0;
+	struct virtq_desc desc;
+	int res = 0;
 
-	if (!vq->ready || !desc || !vq->avail)
+	if (!vq->ready || !vq->desc || !vq->avail)
 		return -1;
 
-	/* dsb() before reading avail->idx published by the driver */
-	dsb();
-	avail_idx = vq->avail->idx;
-	if (avail_idx == vq->last_avail_idx)
-		return 0;	/* ring empty */
+	if (vq->avail_idx == vq->last_avail_idx) {
+		res = vdevice_get_avail_idx(vq);
+		if (res)
+			return res;	/* 1 empty, -1 error */
+	}
+
+	/* avail->idx is free-running; index the ring modulo queue size */
+	idx = vq->last_avail_idx & (vq->num - 1);
+	head = vdevice_get_avail_entry(vq, idx);
+	if (head >= vq->num)
+		return -1;
+
+	desc = vdevice_get_desc(vq, head);
+	if (desc.flags & VIRTQ_DESC_F_INDIRECT) {
+		struct virtq_desc *tbl = NULL;
+		uint16_t nent = 0;
+
+		if (!vq->f_indirect)
+			return -1;
+		if (!desc.len || desc.len % sizeof(struct virtq_desc))
+			return -1;
+		if (desc.addr & (VRING_DESC_ALIGN_SIZE - 1))
+			return -1;
+
+		nent = desc.len / sizeof(struct virtq_desc);
+		tbl = vdevice_map_guest(vq, desc.addr, desc.len);
+		if (!tbl)
+			return -1;
+
+		res = vdevice_chain_accum(vq, 0, tbl, nent, &out_n, &in_n,
+					  &sgs_idx);
+		vdevice_unmap_guest(vq, tbl, desc.len);
+	} else {
+		res = vdevice_chain_accum(vq, head, NULL, vq->num, &out_n,
+					  &in_n, &sgs_idx);
+	}
+
+	if (res)
+		return res;
 
 	memset(chain, 0, sizeof(*chain));
-	head = vq->avail->ring[vq->last_avail_idx % vq->num];
 	chain->head = head;
-	idx = head;
-
-	/*
-	 * Walk the chain. Indirect descriptors are not yet supported; a driver
-	 * only uses them if the device offered VIRTQ_DESC_F_INDIRECT, which
-	 * this core does not.
-	 */
-	for (;;) {
-		if (idx >= vq->num)
-			return -1;
-		if (desc[idx].flags & VIRTQ_DESC_F_INDIRECT)
-			return -1;
-		if (count++ >= vq->num || count > VDEVICE_MAX_DESC_CHAIN)
-			return -1;
-
-		if (vdevice_sg_add(chain, &desc[idx]))
-			return -1;
-
-		if (!(desc[idx].flags & VIRTQ_DESC_F_NEXT))
-			break;
-		idx = desc[idx].next;
+	if (out_n) {
+		chain->out.sg = &vq->sgs[0];
+		chain->out.num = out_n;
+	}
+	if (in_n) {
+		chain->in.sg = &vq->sgs[out_n];
+		chain->in.num = in_n;
 	}
 
 	vq->last_avail_idx++;
 
-	return 1;
+	return 0;
 }
 
-int vdevice_add_used(struct vdevice_vq *vq, uint16_t head, uint32_t len)
+/* Publish @n completions to the used ring, out of submission order */
+static int vdevice_add_used_out_of_order(struct vdevice_vq *vq,
+					 struct virtq_used_elem *elems, int n)
 {
-	uint32_t exceptions = 0;
+	uint16_t used_idx = 0;
 	uint16_t idx = 0;
+	int i = 0;
 
-	if (!vq->used)
-		return -1;
+	for (i = 0; i < n; i++) {
+		idx = (vq->last_used_idx + i) & (vq->num - 1);
+		vdevice_put_used_entry(vq, idx, &elems[i]);
+	}
 
-	exceptions = cpu_spin_lock_xsave(&vq->lock);
-
-	idx = vq->last_used_idx % vq->num;
-	vq->used->ring[idx].id = head;
-	vq->used->ring[idx].len = len;
-
-	/* Publish the ring entry before advancing the visible index */
+	/* Publish the entries before advancing the visible index */
 	dsb();
-	vq->last_used_idx++;
-	vq->used->idx = vq->last_used_idx;
 
-	cpu_spin_unlock_xrestore(&vq->lock, exceptions);
+	used_idx = vq->last_used_idx + n;
+	vdevice_put_used_idx(vq, used_idx);
+	vq->last_used_idx = used_idx;
 
 	return 0;
 }
 
 /*
- * used_event is stored just past the avail ring (see the virtio spec split
- * virtqueue layout: le16 used_event after avail->ring[queue_size]).
+ * Publish @n in-order batches: elems[i] is the representative entry for a batch
+ * of nelems[i] buffers, written at the running used index (virtio spec 2.7.9).
  */
-static uint16_t vdevice_used_event(struct vdevice_vq *vq)
+static int vdevice_add_used_in_order(struct vdevice_vq *vq,
+				     struct virtq_used_elem *elems,
+				     uint16_t *nelems, int n)
 {
-	return vq->avail->ring[vq->num];
+	uint16_t idx = vq->last_used_idx & (vq->num - 1);
+	uint32_t batch = 0;
+	uint16_t used_idx = 0;
+	int i = 0;
+
+	for (i = 0; i < n; i++)
+		if (!nelems[i])
+			return -1;
+
+	for (i = 0; i < n; i++) {
+		vdevice_put_used_entry(vq, idx, &elems[i]);
+		idx += nelems[i];
+		batch += nelems[i];
+		if (idx >= vq->num)
+			idx -= vq->num;
+	}
+
+	/* Publish the entries before advancing the visible index */
+	dsb();
+
+	used_idx = vq->last_used_idx + batch;
+	vdevice_put_used_idx(vq, used_idx);
+	vq->last_used_idx = used_idx;
+
+	return 0;
+}
+
+int vdevice_add_used(struct vdevice_vq *vq, struct virtq_used_elem *elems,
+		     uint16_t *nelems, int n)
+{
+	uint32_t exceptions = 0;
+	int res = 0;
+
+	if (!vq->used)
+		return -1;
+
+	exceptions = cpu_spin_lock_xsave(&vq->lock);
+	if (vq->f_in_order)
+		res = vdevice_add_used_in_order(vq, elems, nelems, n);
+	else
+		res = vdevice_add_used_out_of_order(vq, elems, n);
+	cpu_spin_unlock_xrestore(&vq->lock, exceptions);
+
+	return res;
+}
+
+int vdevice_add_used_one(struct vdevice_vq *vq, uint16_t head, uint32_t len)
+{
+	struct virtq_used_elem elem = { .id = head, .len = len };
+	uint16_t nelems = 1;
+
+	return vdevice_add_used(vq, &elem, &nelems, 1);
+}
+
+/* Decide whether the driver wants an interrupt now (best-effort suppression) */
+static bool vdevice_should_signal(struct vdevice_vq *vq)
+{
+	uint16_t used_event = 0;
+	uint16_t old_used = 0;
+	uint16_t new_used = 0;
+
+	/* Order the used->idx update against reading the driver's event */
+	dsb();
+
+	if (!vq->f_event_idx)
+		return !(vdevice_get_avail_flags(vq) &
+			 VIRTQ_AVAIL_F_NO_INTERRUPT);
+
+	used_event = vdevice_get_used_event(vq);
+	old_used = vq->last_signalled_used_idx;
+	new_used = vq->last_used_idx;
+	vq->last_signalled_used_idx = new_used;
+
+	return vring_need_event(used_event, new_used, old_used);
 }
 
 void vdevice_signal(struct vdevice *vdev, struct vdevice_vq *vq)
 {
-	bool notify = false;
-	uint16_t old = 0;
-	uint16_t new = 0;
-
-	/* Ensure the used ring is visible before we test the driver's flags */
-	dsb();
-
-	if (vq->f_event_idx) {
-		new = vq->last_used_idx;
-		old = vq->signalled_used_idx;
-		notify = vring_need_event(vdevice_used_event(vq), new, old) ||
-			 !vq->signalled_used_valid;
-		vq->signalled_used_idx = new;
-		vq->signalled_used_valid = true;
-	} else {
-		notify = !(vq->avail->flags & VIRTQ_AVAIL_F_NO_INTERRUPT);
-	}
-
-	if (notify && vdev->signal)
+	if (vdevice_should_signal(vq) && vdev->signal)
 		vdev->signal(vdev, vq->qid);
 }
 
 bool vdevice_enable_notify(struct vdevice_vq *vq)
 {
-	/*
-	 * Ask the driver to notify us again and re-check the ring for entries
-	 * that arrived in the meantime. Without EVENT_IDX there is nothing to
-	 * write back; the "clear NO_NOTIFY" advisory lives in the used ring
-	 * flags which the device owns.
-	 */
-	vq->used->flags &= ~VIRTQ_USED_F_NO_NOTIFY;
+	if (!(vq->used_flags & VIRTQ_USED_F_NO_NOTIFY))
+		return false;
+
+	vq->used_flags &= ~VIRTQ_USED_F_NO_NOTIFY;
+
+	if (!vq->f_event_idx)
+		vdevice_put_used_flags(vq, vq->used_flags);
+	else
+		/* Don't ask again until the driver passes the current idx */
+		vdevice_put_avail_event(vq, vq->avail_idx);
+
+	/* Publish the update and re-observe avail->idx */
 	dsb();
 
-	return vq->avail->idx != vq->last_avail_idx;
+	/* 1 (empty) and -1 (error) both mean "nothing new" */
+	if (vdevice_get_avail_idx(vq))
+		return false;
+
+	/* The driver added entries during the window: suppression failed */
+	return true;
 }
 
 void vdevice_disable_notify(struct vdevice_vq *vq)
 {
+	if (vq->used_flags & VIRTQ_USED_F_NO_NOTIFY)
+		return;
+
+	vq->used_flags |= VIRTQ_USED_F_NO_NOTIFY;
+
 	if (!vq->f_event_idx)
-		vq->used->flags |= VIRTQ_USED_F_NO_NOTIFY;
+		vdevice_put_used_flags(vq, vq->used_flags);
 }
 
 /*
- * Copy @len bytes between a linear buffer and the segments of @sgl, mapping
- * each segment's driver bus address on demand. @to selects the direction:
- * true copies from @buf into the (writable) segments, false copies out of the
- * (readable) segments into @buf.
+ * Copy @len bytes between a linear buffer and the segments of @sgl starting at
+ * @cur, mapping each segment's driver DMA address on demand. @to selects the
+ * direction: true copies from @buf into the (writable) segments, false copies
+ * out of the (readable) segments into @buf.
  */
 static int vdevice_sglist_copy(struct vdevice_vq *vq, struct vdevice_sglist *sgl,
 			       struct vdevice_sglist_cursor *cur, void *buf,
@@ -335,39 +746,47 @@ static int vdevice_sglist_copy(struct vdevice_vq *vq, struct vdevice_sglist *sgl
 {
 	uint8_t *lin = buf;
 	size_t done = 0;
+	uint16_t seg = 0;
+	size_t off = 0;
 
-	while (done < len) {
-		struct vdevice_sg *seg = NULL;
-		size_t avail = 0;
+	if (!len)
+		return 0;
+	if (cur->seg >= sgl->num)
+		return -1;
+
+	seg = cur->seg;
+	off = cur->off;
+
+	while (done < len && seg < sgl->num) {
+		struct vdevice_sg *s = &sgl->sg[seg];
 		size_t chunk = 0;
-		void *va = NULL;
 
-		if (cur->seg >= sgl->num)
-			return -1;
-
-		seg = &sgl->sg[cur->seg];
-		avail = seg->len - cur->off;
-		if (!avail) {
-			cur->seg++;
-			cur->off = 0;
+		if (off >= s->len) {
+			seg++;
+			off = 0;
 			continue;
 		}
 
-		chunk = MIN(avail, len - done);
-		va = vq->dma.map(vq->dma.cookie, seg->addr + cur->off, chunk);
-		if (!va)
-			return -1;
-
-		if (to)
-			memcpy(va, lin + done, chunk);
-		else
-			memcpy(lin + done, va, chunk);
-
-		vq->dma.unmap(vq->dma.cookie, va, chunk);
+		chunk = MIN(len - done, s->len - off);
+		if (to) {
+			if (vdevice_copy_to_guest_dma(vq, s->addr + off,
+						      lin + done, chunk))
+				return -1;
+		} else {
+			if (vdevice_copy_from_guest_dma(vq, lin + done,
+							s->addr + off, chunk))
+				return -1;
+		}
 
 		done += chunk;
-		cur->off += chunk;
+		off += chunk;
 	}
+
+	if (done != len)
+		return -1;
+
+	cur->seg = seg;
+	cur->off = off;
 
 	return 0;
 }

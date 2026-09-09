@@ -30,7 +30,7 @@
  *
  * Ring memory is mapped once by the transport layer; per-buffer bus addresses
  * are translated to virtual addresses on demand through the vdevice_vq::dma
- * accessor, so this core never dereferences a driver-supplied address
+ * accessor, so this core never dereferences a driver-supplied payload address
  * directly.
  */
 
@@ -45,13 +45,31 @@
 #define VDEVICE_STATUS_NEEDS_RESET	BIT(6)
 #define VDEVICE_STATUS_FAILED		BIT(7)
 
-/* Transport-independent virtio feature bits used by this core */
+/*
+ * Transport-independent virtio feature bits. VDEVICE_F_START/END bound the
+ * device-independent reserved bit range (virtio spec section 6), which
+ * vdevice_check_features() scans to reject any feature this core does not
+ * understand.
+ */
+#define VDEVICE_F_START			24	/* inclusive */
+#define VDEVICE_F_END			42	/* exclusive */
 #define VDEVICE_F_INDIRECT_DESC		28
 #define VDEVICE_F_EVENT_IDX		29
 #define VDEVICE_F_VERSION_1		32
+#define VDEVICE_F_ACCESS_PLATFORM	33
 #define VDEVICE_F_IN_ORDER		35
+#define VDEVICE_F_RING_RESET		40
 
 struct vdevice;
+
+/*
+ * One scatter-gather segment: a driver bus address and length. The payload is
+ * mapped on demand via vdevice_vq::dma, never dereferenced directly.
+ */
+struct vdevice_sg {
+	uint64_t addr;
+	size_t len;
+};
 
 /*
  * struct vdevice_dma - per-queue accessor to driver (guest) memory.
@@ -61,8 +79,8 @@ struct vdevice;
  *		at least @size bytes, or NULL on failure.
  * @unmap:	release a translation previously returned by @map.
  *
- * This is the only path through which the core touches driver memory, keeping
- * it independent of how the transport made that memory reachable.
+ * This is the only path through which the core touches driver payload memory,
+ * keeping it independent of how the transport made that memory reachable.
  */
 struct vdevice_dma {
 	void *cookie;
@@ -75,17 +93,21 @@ struct vdevice_dma {
  * @qid:		queue index.
  * @ready:		true once the ring pointers are set and the queue is
  *			enabled.
- * @lock:		protects the used-ring producer state of this queue.
+ * @lock:		protects all ring processing of this queue.
  * @desc/@avail/@used:	mapped ring pointers (set by vdevice_set_ring()).
  * @num:		number of descriptors in the ring (queue size).
  * @desc_ba/@avail_ba/@used_ba: bus addresses of the rings, kept for unmap.
- * @last_avail_idx:	next avail ring entry the device will consume.
- * @last_used_idx:	device-side copy of used->idx.
- * @signalled_used_idx:	used->idx at the last signal, for EVENT_IDX.
- * @signalled_used_valid: whether @signalled_used_idx has been set yet.
- * @f_event_idx/@f_indirect/@f_in_order: negotiated feature cache.
  * @notify:		transport callback invoked when the driver kicks this
  *			queue (a "descriptor available" event).
+ * @f_version_1/@f_event_idx/@f_indirect/@f_in_order/@f_reset_vq: negotiated
+ *			feature cache, latched by vdevice_set_ring().
+ * @last_avail_idx:	next avail ring entry the device will consume.
+ * @last_used_idx:	device-side copy of used->idx.
+ * @last_signalled_used_idx: used->idx at the last signal, for EVENT_IDX.
+ * @used_flags:		device's cached copy of used->flags.
+ * @avail_idx:		last observed avail->idx.
+ * @sgs:		scratch scatter-gather array for one parsed chain; the
+ *			sglists returned by vdevice_get_vq_desc() point into it.
  * @dma:		accessor to driver memory for this queue's buffers.
  */
 struct vdevice_vq {
@@ -102,17 +124,31 @@ struct vdevice_vq {
 	uint64_t avail_ba;
 	uint64_t used_ba;
 
-	uint16_t last_avail_idx;
-	uint16_t last_used_idx;
-	uint16_t signalled_used_idx;
-	bool signalled_used_valid;
+	void (*notify)(struct vdevice *vdev, struct vdevice_vq *vq);
 
+	/* Negotiated feature cache */
+	bool f_version_1;
 	bool f_event_idx;
 	bool f_indirect;
 	bool f_in_order;
+	bool f_reset_vq;
 
-	void (*notify)(struct vdevice *vdev, struct vdevice_vq *vq);
+	uint16_t last_avail_idx;
+	uint16_t last_used_idx;
+	uint16_t last_signalled_used_idx;
+
+	/* Ring caches */
+	uint16_t used_flags;
+	uint16_t avail_idx;
+
 	struct vdevice_dma dma;
+
+	/*
+	 * Scratch scatter-gather array for one parsed chain. The sglists
+	 * returned by vdevice_get_vq_desc() point into this storage and are
+	 * only valid until the next parse on this queue.
+	 */
+	struct vdevice_sg sgs[VDEVICE_MAX_DESC_CHAIN];
 };
 
 /*
@@ -124,13 +160,15 @@ struct vdevice_vq {
  *
  * @start:		driver reached DRIVER_OK, bring the device live.
  * @stop:		device is being reset/stopped, quiesce it.
- * @reset_vq:		reset a single queue's device-type state.
+ * @reset_vq:		reset a single queue's device-type state (only invoked
+ *			when VIRTIO_F_RING_RESET was negotiated).
  * @gen_count:		return the config-space generation counter.
  * @get:		read @len bytes of config space at @offset.
  * @set:		write @len bytes of config space at @offset; the new
  *			generation counter is returned in *@gen.
- * @get_features:	return the features the device offers.
- * @finalize_features:	the driver accepted @features; latch them.
+ * @get_features:	OR the features the device offers into *@features.
+ * @finalize_features:	the driver proposed @features; validate/latch them.
+ *			Returns 0 to accept, negative to reject.
  */
 struct vdevice_ops {
 	int (*start)(struct vdevice *vdev);
@@ -150,7 +188,8 @@ struct vdevice_ops {
  * @ops:		device-type callbacks.
  * @signal:		transport callback used to notify the driver that the
  *			used ring advanced on queue @qid.
- * @features:		features offered by the device (from ops->get_features).
+ * @features:		default features offered by the core (device-specific
+ *			bits are added on top via ops->get_features()).
  * @features_neg:	features negotiated with the driver.
  * @num_queues:		number of queues in @vqs.
  * @vqs:		array of @num_queues queues.
@@ -176,25 +215,23 @@ struct vdevice {
 };
 
 /*
- * A parsed descriptor chain, split into device-readable (out) and
- * device-writable (in) segments. Each segment records a driver bus address
- * and length; the buffer is mapped on demand via vdevice_vq::dma.
+ * A scatter-gather list over a parsed descriptor chain. @sg points into the
+ * owning queue's scratch array (vdevice_vq::sgs) and is only valid until the
+ * next vdevice_get_vq_desc() on that queue.
  */
-struct vdevice_sg {
-	uint64_t addr;
-	size_t len;
-};
-
 struct vdevice_sglist {
-	struct vdevice_sg sg[VDEVICE_MAX_DESC_CHAIN];
+	struct vdevice_sg *sg;
 	uint16_t num;
-	size_t total;
 };
 
+/*
+ * A parsed descriptor chain, split into device-readable (out) and
+ * device-writable (in) segments, in that spec-mandated order.
+ */
 struct vdevice_chain {
 	uint16_t head;
-	struct vdevice_sglist out;	/* device-readable */
-	struct vdevice_sglist in;	/* device-writable */
+	struct vdevice_sglist out;	/* device-readable (driver OUT) */
+	struct vdevice_sglist in;	/* device-writable (driver IN) */
 };
 
 /* Cursor for copying across the segments of a sglist */
@@ -203,6 +240,24 @@ struct vdevice_sglist_cursor {
 	size_t off;
 };
 
+static inline void vdevice_sglist_cursor_reset(struct vdevice_sglist_cursor *c)
+{
+	c->seg = 0;
+	c->off = 0;
+}
+
+/* Total number of bytes described by @sgl */
+static inline size_t vdevice_sglist_len(const struct vdevice_sglist *sgl)
+{
+	size_t len = 0;
+	uint16_t i = 0;
+
+	for (i = 0; i < sgl->num; i++)
+		len += sgl->sg[i].len;
+
+	return len;
+}
+
 /*
  * vdevice_init() - initialise a device instance.
  * @vdev:	device to initialise.
@@ -210,11 +265,22 @@ struct vdevice_sglist_cursor {
  * @num_queues:	number of queues.
  * @ops:	device-type callbacks.
  *
- * Zeroes the queues, wires their @qid, stores @ops and queries the
- * device-offered features via ops->get_features().
+ * Zeroes the queues, wires their @qid, stores @ops and seeds the core default
+ * features (INDIRECT_DESC, EVENT_IDX, VERSION_1). Device-specific features are
+ * added on top by the transport through ops->get_features().
  */
 void vdevice_init(struct vdevice *vdev, struct vdevice_vq *vqs, int num_queues,
 		  const struct vdevice_ops *ops);
+
+/*
+ * vdevice_check_features() - core validation of a proposed feature set.
+ *
+ * Requires VIRTIO_F_VERSION_1 and rejects any device-independent reserved bit
+ * this core does not implement. Returns 0 if acceptable, negative otherwise.
+ * The device's own finalize_features() is consulted separately (by the
+ * transport) for device-specific constraints.
+ */
+int vdevice_check_features(struct vdevice *vdev, uint64_t features);
 
 /* Read the device status field */
 uint8_t vdevice_status_read(struct vdevice *vdev);
@@ -224,9 +290,10 @@ uint8_t vdevice_status_read(struct vdevice *vdev);
  * @vdev:	device.
  * @status:	new status value written by the driver.
  *
- * Latches negotiated features on FEATURES_OK, starts the device on DRIVER_OK
- * and, when @status is 0, performs a clean reset (stop + reset all queues).
- * Returns 0 on success or a negative value on an illegal transition.
+ * Implements the virtio spec status transitions: a write of 0 is a clean reset
+ * (stop + reset all queues, no panic); FAILED latches and stops; DRIVER_OK
+ * starts the device. Returns 0 on success or a negative value on an illegal
+ * transition.
  */
 int vdevice_status_write(struct vdevice *vdev, uint8_t status);
 
@@ -236,10 +303,11 @@ int vdevice_status_write(struct vdevice *vdev, uint8_t status);
  * @qid:	queue index.
  * @desc/@avail/@used: mapped ring virtual addresses.
  * @desc_ba/@avail_ba/@used_ba: bus addresses of the rings (kept for unmap).
- * @num:	queue size (number of descriptors).
+ * @num:	queue size (number of descriptors, must be a power of two).
  *
- * Caches the negotiated per-queue feature bits. The queue is not consumed
- * until it is marked ready with vdevice_set_ring_ready().
+ * Must be called at FEATURES_OK. Seeds the index/cache state from the guest
+ * rings and latches the negotiated per-queue feature bits. The queue is not
+ * consumed until it is marked ready with vdevice_set_ring_ready().
  */
 int vdevice_set_ring(struct vdevice *vdev, int qid, void *desc, void *avail,
 		     void *used, uint64_t desc_ba, uint64_t avail_ba,
@@ -248,39 +316,64 @@ int vdevice_set_ring(struct vdevice *vdev, int qid, void *desc, void *avail,
 /* Mark a queue ready (or not) for the device to consume */
 void vdevice_set_ring_ready(struct vdevice_vq *vq, bool ready);
 
-/* Reset a single queue: device-type reset_vq() plus core producer state */
+/*
+ * vdevice_reset_queue() - reset a single queue.
+ *
+ * Only valid when VIRTIO_F_RING_RESET was negotiated for the queue. Disables
+ * the queue, calls the device-type reset_vq(), then clears core queue state.
+ * Returns 0 on success or negative on error.
+ */
 int vdevice_reset_queue(struct vdevice *vdev, int qid);
 
 /*
  * vdevice_get_vq_desc() - pop the next available descriptor chain.
  * @vq:		queue.
- * @chain:	filled in with the head index and out/in sglists.
+ * @chain:	filled in with the head index and out/in sglists (pointing
+ *		into vq->sgs).
  *
- * Walks the chain following VIRTQ_DESC_F_NEXT and VIRTQ_DESC_F_INDIRECT,
- * splitting segments into @chain->out (readable) and @chain->in (writable),
- * bounded by VDEVICE_MAX_DESC_CHAIN. Returns 1 when a chain was popped, 0 when
+ * Walks the chain following VIRTQ_DESC_F_NEXT, resolving a trailing
+ * VIRTQ_DESC_F_INDIRECT table when INDIRECT_DESC was negotiated, splitting
+ * segments into @chain->out (readable, first) and @chain->in (writable),
+ * bounded by VDEVICE_MAX_DESC_CHAIN. Returns 0 when a chain was popped, 1 when
  * the ring is empty, or a negative value on a malformed chain.
  */
 int vdevice_get_vq_desc(struct vdevice_vq *vq, struct vdevice_chain *chain);
 
 /*
- * vdevice_add_used() - publish a consumed chain to the used ring.
+ * vdevice_add_used_one() - publish one consumed chain to the used ring.
  * @vq:		queue.
  * @head:	head descriptor index (from vdevice_get_vq_desc()).
  * @len:	total number of bytes written into the writable buffers.
  */
-int vdevice_add_used(struct vdevice_vq *vq, uint16_t head, uint32_t len);
+int vdevice_add_used_one(struct vdevice_vq *vq, uint16_t head, uint32_t len);
+
+/*
+ * vdevice_add_used() - publish @n completions to the used ring.
+ * @vq:		queue.
+ * @elems:	@n used elements (one representative per batch when in-order).
+ * @nelems:	@n per-batch sizes (used only when VIRTIO_F_IN_ORDER negotiated).
+ * @n:		number of entries.
+ */
+int vdevice_add_used(struct vdevice_vq *vq, struct virtq_used_elem *elems,
+		     uint16_t *nelems, int n);
 
 /*
  * vdevice_signal() - notify the driver if it wants to be, after add_used().
  *
- * Applies the used-event / VIRTQ_USED_F_NO_NOTIFY logic and, if a notification
- * is due, calls vdev->signal().
+ * Applies the used-event / VIRTQ_AVAIL_F_NO_INTERRUPT logic and, if a
+ * notification is due, calls vdev->signal().
  */
 void vdevice_signal(struct vdevice *vdev, struct vdevice_vq *vq);
 
-/* Toggle "please notify me on new descriptors" back towards the driver */
+/*
+ * vdevice_enable_notify() - ask the driver to kick us on new descriptors.
+ *
+ * Returns true if the driver added entries in the race window, meaning the
+ * caller should re-scan the queue.
+ */
 bool vdevice_enable_notify(struct vdevice_vq *vq);
+
+/* Suppress driver kicks for this queue */
 void vdevice_disable_notify(struct vdevice_vq *vq);
 
 /*

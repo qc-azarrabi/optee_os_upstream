@@ -237,23 +237,46 @@ static void handle_get_dev_features(struct virtio_msg *msg,
 				    struct virtio_msg_dev *vmdev)
 {
 	struct msg_features *v = (void *)msg->payload;
-	uint64_t feat = vmdev->vdev.features;
-	uint32_t word = 0;
+	struct vdevice *vdev = &vmdev->vdev;
+	uint64_t feat = vdev->features;
+	uint32_t blocks[2] = { 0 };
+	uint32_t index = 0;
+	uint32_t num = 0;
+	uint32_t i = 0;
 
 	if (msg->msg_size != sizeof(*msg) + sizeof(*v)) {
 		virtio_msg_null_resp(msg);
 		return;
 	}
 
-	/* One 32-bit block per request; index selects lower/upper word */
-	if (v->index == 0)
-		word = feat & 0xffffffff;
-	else if (v->index == 1)
-		word = feat >> 32;
+	/* Report core defaults plus the device-specific feature bits */
+	if (vdev->ops->get_features)
+		vdev->ops->get_features(vdev, &feat);
 
-	v->num = 1;
-	memcpy(v->features, &word, sizeof(word));
-	msg->msg_size = sizeof(*msg) + sizeof(*v) + sizeof(word);
+	index = v->index;
+	num = v->num;
+	blocks[0] = feat & 0xffffffff;
+	blocks[1] = feat >> 32;
+
+	/*
+	 * Features are exchanged in 32-bit blocks. Report @num blocks starting
+	 * at @index; out-of-range blocks read as zero (virtio spec 4.4.2.4).
+	 */
+	if (sizeof(*msg) + sizeof(*v) + num * sizeof(uint32_t) >
+	    VIRTIO_MSG_MAX_SIZE) {
+		virtio_msg_null_resp(msg);
+		return;
+	}
+
+	for (i = 0; i < num; i++) {
+		uint32_t word = 0;
+
+		if (index + i < ARRAY_SIZE(blocks))
+			word = blocks[index + i];
+		memcpy(v->features + i * sizeof(word), &word, sizeof(word));
+	}
+
+	msg->msg_size = sizeof(*msg) + sizeof(*v) + num * sizeof(uint32_t);
 }
 
 static void handle_set_drv_features(struct virtio_msg *msg,
@@ -261,20 +284,53 @@ static void handle_set_drv_features(struct virtio_msg *msg,
 {
 	struct msg_features *v = (void *)msg->payload;
 	struct vdevice *vdev = &vmdev->vdev;
-	uint32_t word = 0;
+	uint64_t feat = 0;
+	uint32_t index = 0;
+	uint32_t num = 0;
+	uint32_t i = 0;
 
-	if (msg->msg_size < sizeof(*msg) + sizeof(*v) + sizeof(word)) {
+	if (msg->msg_size < sizeof(*msg) + sizeof(*v)) {
 		virtio_msg_null_resp(msg);
 		return;
 	}
 
-	memcpy(&word, v->features, sizeof(word));
-	if (v->index == 0)
-		vdev->features_neg = (vdev->features_neg & ~0xffffffffULL) | word;
-	else if (v->index == 1)
-		vdev->features_neg = (vdev->features_neg & 0xffffffffULL) |
-				     ((uint64_t)word << 32);
+	index = v->index;
+	num = v->num;
+	if (msg->msg_size != sizeof(*msg) + sizeof(*v) +
+			     num * sizeof(uint32_t)) {
+		virtio_msg_null_resp(msg);
+		return;
+	}
 
+	/*
+	 * Assemble the proposed 64-bit feature set from @num 32-bit blocks. Any
+	 * block outside the 64-bit range is a malformed request.
+	 */
+	for (i = 0; i < num; i++) {
+		uint32_t word = 0;
+
+		if (index + i >= 2) {
+			virtio_msg_null_resp(msg);
+			return;
+		}
+		memcpy(&word, v->features + i * sizeof(word), sizeof(word));
+		feat |= (uint64_t)word << ((index + i) * 32);
+	}
+
+	/*
+	 * Validate against the core-supported set and let the device reject
+	 * unsupported combinations before latching the negotiated features.
+	 * A rejected proposal simply leaves features_neg unchanged; the driver
+	 * will fail to reach FEATURES_OK.
+	 */
+	if (vdevice_check_features(vdev, feat))
+		goto out;
+	if (vdev->ops->finalize_features &&
+	    vdev->ops->finalize_features(vdev, feat))
+		goto out;
+
+	vdev->features_neg = feat;
+out:
 	msg->msg_size = sizeof(*msg);
 }
 
