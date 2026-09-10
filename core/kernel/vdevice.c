@@ -101,16 +101,20 @@ static struct virtq_desc vdevice_get_indirect_desc(struct virtq_desc *table,
 static void *vdevice_map_guest(struct vdevice_vq *vq, uint64_t dma_addr,
 			       size_t size)
 {
-	if (!vq->dma.map)
+	struct vdevice_dma *dma = &vq->vdev->dma;
+
+	if (!dma->map)
 		return NULL;
 
-	return vq->dma.map(vq->dma.cookie, dma_addr, size);
+	return dma->map(dma->cookie, dma_addr, size);
 }
 
 static void vdevice_unmap_guest(struct vdevice_vq *vq, void *addr, size_t size)
 {
-	if (vq->dma.unmap)
-		vq->dma.unmap(vq->dma.cookie, addr, size);
+	struct vdevice_dma *dma = &vq->vdev->dma;
+
+	if (dma->unmap)
+		dma->unmap(dma->cookie, addr, size);
 }
 
 /* Copy @len bytes from a guest DMA address into a host buffer */
@@ -174,6 +178,7 @@ void vdevice_init(struct vdevice *vdev, struct vdevice_vq *vqs, int num_queues,
 	for (n = 0; n < num_queues; n++) {
 		vqs[n].qid = n;
 		vqs[n].lock = SPINLOCK_UNLOCK;
+		vqs[n].vdev = vdev;
 	}
 }
 

@@ -72,7 +72,7 @@ struct vdevice_sg {
 };
 
 /*
- * struct vdevice_dma - per-queue accessor to driver (guest) memory.
+ * struct vdevice_dma - per-device accessor to driver (guest) memory.
  * @cookie:	opaque context passed back to @map / @unmap (the transport
  *		endpoint that owns the mapped areas).
  * @map:	translate a driver bus address to a virtual address valid for
@@ -80,7 +80,8 @@ struct vdevice_sg {
  * @unmap:	release a translation previously returned by @map.
  *
  * This is the only path through which the core touches driver payload memory,
- * keeping it independent of how the transport made that memory reachable.
+ * keeping it independent of how the transport made that memory reachable. It is
+ * shared by all of a device's queues (reached through vdevice_vq::vdev).
  */
 struct vdevice_dma {
 	void *cookie;
@@ -108,7 +109,7 @@ struct vdevice_dma {
  * @avail_idx:		last observed avail->idx.
  * @sgs:		scratch scatter-gather array for one parsed chain; the
  *			sglists returned by vdevice_get_vq_desc() point into it.
- * @dma:		accessor to driver memory for this queue's buffers.
+ * @vdev:		owning device, for reaching the shared DMA accessor.
  */
 struct vdevice_vq {
 	int qid;
@@ -141,7 +142,7 @@ struct vdevice_vq {
 	uint16_t used_flags;
 	uint16_t avail_idx;
 
-	struct vdevice_dma dma;
+	struct vdevice *vdev;
 
 	/*
 	 * Scratch scatter-gather array for one parsed chain. The sglists
@@ -193,6 +194,7 @@ struct vdevice_ops {
  * @features_neg:	features negotiated with the driver.
  * @num_queues:		number of queues in @vqs.
  * @vqs:		array of @num_queues queues.
+ * @dma:		accessor to driver memory, shared by all queues.
  * @status:		virtio device status field.
  * @started:		true between a successful ops->start() and ops->stop().
  * @priv:		device-type private pointer.
@@ -208,6 +210,7 @@ struct vdevice {
 
 	int num_queues;
 	struct vdevice_vq *vqs;
+	struct vdevice_dma dma;
 
 	uint8_t status;
 	bool started;

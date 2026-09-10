@@ -122,6 +122,10 @@ int virtio_msg_bus_add(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev)
 			bus->devs[n] = vmdev;
 			vmdev->dev_id = n;
 			vmdev->bus = bus;
+			/* Give the device a memory accessor for its buffers */
+			vmdev->vdev.dma.cookie = bus->ops_cookie;
+			vmdev->vdev.dma.map = bus->ops->map_area;
+			vmdev->vdev.dma.unmap = bus->ops->unmap_area;
 			return 0;
 		}
 	}
@@ -506,10 +510,6 @@ static void handle_set_vqueue(struct virtio_msg *msg,
 			     req->device_addr, req->size))
 		goto err_unmap;
 
-	/* Give the queue a memory accessor for its buffers */
-	vq->dma.cookie = bus->ops_cookie;
-	vq->dma.map = bus->ops->map_area;
-	vq->dma.unmap = bus->ops->unmap_area;
 	vdevice_set_ring_ready(vq, true);
 
 	msg->msg_size = sizeof(*msg);
