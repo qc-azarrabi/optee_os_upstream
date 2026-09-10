@@ -3,7 +3,6 @@
  * Copyright (c) 2026, Qualcomm Technologies, Inc.
  */
 
-#include <kernel/notif.h>
 #include <kernel/vdevice.h>
 #include <kernel/virtio_msg.h>
 #include <malloc.h>
@@ -624,12 +623,8 @@ static void handle_event_avail(struct virtio_msg *msg,
 
 	if (ev->index < (uint32_t)vdev->num_queues) {
 		vq = &vdev->vqs[ev->index];
-		if (vq->ready) {
-			if (vq->notify)
-				vq->notify(vdev, vq);
-			else
-				notif_send_async(NOTIF_VALUE_DO_BOTTOM_HALF, 0);
-		}
+		if (vq->ready && vq->notify)
+			vq->notify(vdev, vq);
 	}
 	msg->msg_size = sizeof(*msg);
 }
