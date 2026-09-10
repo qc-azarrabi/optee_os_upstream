@@ -4,8 +4,6 @@
  */
 
 #include <ffa.h>
-#include <initcall.h>
-#include <kernel/notif.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
 #include <kernel/thread_spmc.h>
@@ -602,65 +600,3 @@ TEE_Result virtio_msg_ffa_register_driver(struct virtio_msg_bus_driver *drv)
 
 	return TEE_SUCCESS;
 }
-
-/*
- * Bottom-half: the driver's EVENT_AVAIL kick raises the async notification;
- * here we sweep every ready queue of every device on every endpoint and run
- * its notify callback.
- *
- * A device's notify callback may sleep (take a mutex, allocate), so it must
- * not run under ep_head_lock. Endpoints are only ever added, never removed,
- * so an endpoint pointer stays valid across dropping the lock: save the next
- * link before releasing, sweep the current endpoint unlocked, then resume.
- */
-static void virtio_msg_ffa_yielding_cb(struct notif_driver *ndrv __unused,
-				       enum notif_event ev)
-{
-	struct virtio_msg_ffa_ep *ep = NULL;
-	struct virtio_msg_ffa_ep *next = NULL;
-	uint32_t state = 0;
-	size_t i = 0;
-	int q = 0;
-
-	if (ev != NOTIF_EVENT_DO_BOTTOM_HALF)
-		return;
-
-	state = cpu_spin_lock_xsave(&ep_head_lock);
-	ep = TAILQ_FIRST(&ep_head);
-	while (ep) {
-		next = TAILQ_NEXT(ep, link);
-		cpu_spin_unlock_xrestore(&ep_head_lock, state);
-
-		for (i = 0; i < VIRTIO_MSG_BUS_MAX_DEVS; i++) {
-			struct virtio_msg_dev *vmdev = ep->bus.devs[i];
-			struct vdevice *vdev = NULL;
-
-			if (!vmdev)
-				continue;
-			vdev = &vmdev->vdev;
-			for (q = 0; q < vdev->num_queues; q++) {
-				struct vdevice_vq *vq = &vdev->vqs[q];
-
-				if (vq->ready && vq->notify)
-					vq->notify(vdev, vq);
-			}
-		}
-
-		state = cpu_spin_lock_xsave(&ep_head_lock);
-		ep = next;
-	}
-	cpu_spin_unlock_xrestore(&ep_head_lock, state);
-}
-
-static struct notif_driver virtio_msg_ffa_notif __nex_data = {
-	.yielding_cb = virtio_msg_ffa_yielding_cb,
-};
-
-static TEE_Result virtio_msg_ffa_init(void)
-{
-	notif_register_driver(&virtio_msg_ffa_notif);
-
-	return TEE_SUCCESS;
-}
-
-nex_service_init_late(virtio_msg_ffa_init);
