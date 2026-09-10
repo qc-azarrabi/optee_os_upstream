@@ -113,6 +113,29 @@ void virtio_msg_bus_init(struct virtio_msg_bus *bus, enum virtio_msg_role role,
 	bus->ops_cookie = cookie;
 }
 
+/*
+ * Guest-memory accessor handed to the device core. The core passes back the
+ * owning vdevice; recover the bus from it and defer to the carrier's area ops.
+ */
+static void *virtio_msg_dma_map(struct vdevice *vdev, uint64_t bus_addr,
+				size_t size)
+{
+	struct virtio_msg_dev *vmdev =
+		container_of(vdev, struct virtio_msg_dev, vdev);
+	struct virtio_msg_bus *bus = vmdev->bus;
+
+	return bus->ops->map_area(bus->ops_cookie, bus_addr, size);
+}
+
+static void virtio_msg_dma_unmap(struct vdevice *vdev, void *va, size_t size)
+{
+	struct virtio_msg_dev *vmdev =
+		container_of(vdev, struct virtio_msg_dev, vdev);
+	struct virtio_msg_bus *bus = vmdev->bus;
+
+	bus->ops->unmap_area(bus->ops_cookie, va, size);
+}
+
 int virtio_msg_bus_add(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev)
 {
 	uint16_t n = 0;
@@ -123,9 +146,8 @@ int virtio_msg_bus_add(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev)
 			vmdev->dev_id = n;
 			vmdev->bus = bus;
 			/* Give the device a memory accessor for its buffers */
-			vmdev->vdev.dma.cookie = bus->ops_cookie;
-			vmdev->vdev.dma.map = bus->ops->map_area;
-			vmdev->vdev.dma.unmap = bus->ops->unmap_area;
+			vmdev->vdev.dma.map = virtio_msg_dma_map;
+			vmdev->vdev.dma.unmap = virtio_msg_dma_unmap;
 			return 0;
 		}
 	}

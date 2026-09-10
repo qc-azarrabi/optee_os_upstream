@@ -73,20 +73,19 @@ struct vdevice_sg {
 
 /*
  * struct vdevice_dma - per-device accessor to driver (guest) memory.
- * @cookie:	opaque context passed back to @map / @unmap (the transport
- *		endpoint that owns the mapped areas).
  * @map:	translate a driver bus address to a virtual address valid for
  *		at least @size bytes, or NULL on failure.
  * @unmap:	release a translation previously returned by @map.
  *
  * This is the only path through which the core touches driver payload memory,
  * keeping it independent of how the transport made that memory reachable. It is
- * shared by all of a device's queues (reached through vdevice_vq::vdev).
+ * shared by all of a device's queues (reached through vdevice_vq::vdev). Both
+ * callbacks receive the owning @vdev; the transport recovers its own context
+ * from it with container_of(), so the core stores no opaque cookie.
  */
 struct vdevice_dma {
-	void *cookie;
-	void *(*map)(void *cookie, uint64_t bus_addr, size_t size);
-	void (*unmap)(void *cookie, void *va, size_t size);
+	void *(*map)(struct vdevice *vdev, uint64_t bus_addr, size_t size);
+	void (*unmap)(struct vdevice *vdev, void *va, size_t size);
 };
 
 /*

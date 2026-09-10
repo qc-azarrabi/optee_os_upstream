@@ -106,7 +106,7 @@ static void *vdevice_map_guest(struct vdevice_vq *vq, uint64_t dma_addr,
 	if (!dma->map)
 		return NULL;
 
-	return dma->map(dma->cookie, dma_addr, size);
+	return dma->map(vq->vdev, dma_addr, size);
 }
 
 static void vdevice_unmap_guest(struct vdevice_vq *vq, void *addr, size_t size)
@@ -114,7 +114,7 @@ static void vdevice_unmap_guest(struct vdevice_vq *vq, void *addr, size_t size)
 	struct vdevice_dma *dma = &vq->vdev->dma;
 
 	if (dma->unmap)
-		dma->unmap(dma->cookie, addr, size);
+		dma->unmap(vq->vdev, addr, size);
 }
 
 /* Copy @len bytes from a guest DMA address into a host buffer */
