@@ -256,6 +256,13 @@ static int __maybe_unused ffa_set_notification(uint16_t dst, uint16_t src,
 			       low32_from_64(bitmap), high32_from_64(bitmap));
 }
 
+#if defined(CFG_VIRTIO_MSG_FFA) && !defined(CFG_CORE_SEL1_SPMC)
+int spmc_ffa_set_notification(uint16_t dst, uint32_t flags, uint64_t bitmap)
+{
+	return ffa_set_notification(dst, optee_core_lsp.sp_id, flags, bitmap);
+}
+#endif
+
 #if defined(CFG_CORE_SEL1_SPMC)
 static void handle_features(struct thread_smc_1_2_regs *args)
 {

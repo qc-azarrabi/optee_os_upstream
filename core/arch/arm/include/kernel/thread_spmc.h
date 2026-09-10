@@ -94,6 +94,18 @@ struct mobj_ffa *thread_spmc_populate_mobj_from_rx(uint64_t cookie,
 void thread_spmc_relinquish(uint64_t memory_region_handle);
 #endif
 
+#if defined(CFG_VIRTIO_MSG_FFA) && !defined(CFG_CORE_SEL1_SPMC)
+/*
+ * spmc_ffa_set_notification() - set an FF-A notification towards a non-secure
+ * endpoint on behalf of the OP-TEE core LSP.
+ *
+ * Used by the virtio-msg FF-A carrier to deliver VIRTIO_MSG_EVENT_USED as an
+ * FF-A notification. Only available when the SPMC is external (S-EL2), where
+ * OP-TEE can originate FFA_NOTIFICATION_SET.
+ */
+int spmc_ffa_set_notification(uint16_t dst, uint32_t flags, uint64_t bitmap);
+#endif
+
 #if defined(CFG_CORE_DYN_PROTMEM) && defined(CFG_CORE_FFA)
 TEE_Result thread_spmc_get_protmem_config(enum mobj_use_case use_case,
 					  void *buf, size_t *buf_sz,
