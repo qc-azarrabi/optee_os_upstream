@@ -104,11 +104,10 @@ struct msg_event_avail {
 	uint32_t next_offset_wrap;
 } __packed;
 
-void virtio_msg_bus_init(struct virtio_msg_bus *bus, enum virtio_msg_role role,
+void virtio_msg_bus_init(struct virtio_msg_bus *bus,
 			 const struct virtio_msg_bus_ops *ops, void *cookie)
 {
 	memset(bus, 0, sizeof(*bus));
-	bus->role = role;
 	bus->ops = ops;
 	bus->ops_cookie = cookie;
 }

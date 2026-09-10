@@ -333,8 +333,7 @@ static struct virtio_msg_ffa_ep *ep_alloc(uint16_t ffa_ep_id)
 	ep->lock = SPINLOCK_UNLOCK;
 	ep->ev_type = FFA_BUS_EVENT_POLLING;
 	TAILQ_INIT(&ep->areas);
-	virtio_msg_bus_init(&ep->bus, VIRTIO_MSG_ROLE_DEVICE,
-			    &virtio_msg_ffa_bus_ops, ep);
+	virtio_msg_bus_init(&ep->bus, &virtio_msg_ffa_bus_ops, ep);
 
 	/* Let every registered driver attach its devices to this bus */
 	for (i = 0; i < drivers_count; i++) {

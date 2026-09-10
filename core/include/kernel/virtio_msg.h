@@ -83,18 +83,6 @@ struct virtio_msg_bus;
 struct virtio_msg_dev;
 
 /*
- * struct virtio_msg_role - direction of a bus.
- *
- * The backend (device) side serves requests originated by the driver. A
- * future frontend (driver) side would originate requests instead; the role
- * field lets the same structures and carrier serve both without change.
- */
-enum virtio_msg_role {
-	VIRTIO_MSG_ROLE_DEVICE = 0,
-	VIRTIO_MSG_ROLE_DRIVER = 1,
-};
-
-/*
  * struct virtio_msg_bus_ops - carrier callbacks, provided by the FF-A layer.
  * @map_area:	translate a driver bus address to a VA valid for @len bytes.
  * @unmap_area:	release a translation from @map_area.
@@ -116,13 +104,11 @@ struct virtio_msg_bus_ops {
  * @devs:	devices attached to this bus, indexed by dev_id.
  * @ops:	carrier callbacks.
  * @ops_cookie:	opaque carrier context passed back to @ops (the endpoint).
- * @role:	DEVICE for the backend.
  */
 struct virtio_msg_bus {
 	struct virtio_msg_dev *devs[VIRTIO_MSG_BUS_MAX_DEVS];
 	const struct virtio_msg_bus_ops *ops;
 	void *ops_cookie;
-	enum virtio_msg_role role;
 };
 
 /* Per-device event configuration set by the driver (EVENT_CONFIGURE) */
@@ -157,8 +143,8 @@ struct virtio_bus_driver {
 	void (*deinit)(struct virtio_msg_dev *vmdev);
 };
 
-/* Initialise an empty bus for the given role */
-void virtio_msg_bus_init(struct virtio_msg_bus *bus, enum virtio_msg_role role,
+/* Initialise an empty bus */
+void virtio_msg_bus_init(struct virtio_msg_bus *bus,
 			 const struct virtio_msg_bus_ops *ops, void *cookie);
 
 /* Attach a device to the first free slot; sets vmdev->dev_id and ->bus */
