@@ -335,9 +335,9 @@ static struct virtio_msg_ffa_ep *ep_alloc(uint16_t ffa_ep_id)
 	TAILQ_INIT(&ep->areas);
 	virtio_msg_bus_init(&ep->bus, &virtio_msg_ffa_bus_ops, ep);
 
-	/* Let every registered driver attach its devices to this bus */
+	/* Let every registered driver attach its device to this bus */
 	for (i = 0; i < drivers_count; i++) {
-		if (!drivers[i]->init(&ep->bus))
+		if (!virtio_msg_bus_attach_driver(&ep->bus, drivers[i]))
 			any = true;
 	}
 

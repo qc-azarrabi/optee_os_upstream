@@ -104,13 +104,16 @@ TAILQ_HEAD(virtio_vsock_pkt_head, virtio_vsock_pkt);
 
 /*
  * struct virtio_vsock_device - the vsock backend on one bus.
- * @vmdev:	virtio-msg device; first member so container_of() works.
+ * @vdev:	the device core we serve; owned by the virtio-msg framework.
  * @cid:	this device's context id (exposed as the config space).
  * @vqs:	the three virtqueues (RX, TX, EVENT).
  * @send_queue:	outbound packets pending delivery on the RX queue.
+ *
+ * Hung off @vdev->priv. This device type only ever sees struct vdevice; the
+ * virtio-msg transport wrapper is owned and hidden by the framework.
  */
 struct virtio_vsock_device {
-	struct virtio_msg_dev vmdev;
+	struct vdevice *vdev;
 	uint64_t cid;
 	struct vdevice_vq vqs[VIRTIO_VSOCK_VQ_IDX_COUNT];
 	struct virtio_vsock_pkt_head send_queue;
@@ -135,7 +138,7 @@ static struct virtio_vsock_socket_head sockets_head =
 
 static struct virtio_vsock_device *vdev_to_dev(struct vdevice *vdev)
 {
-	return container_of(vdev, struct virtio_vsock_device, vmdev.vdev);
+	return vdev->priv;
 }
 
 /* Socket lookup helpers (all assume sock_lock held) */
@@ -265,7 +268,7 @@ static void vsock_pkt_free(struct virtio_vsock_device *dev,
  */
 static void vsock_do_send(struct virtio_vsock_device *dev)
 {
-	struct vdevice *vdev = &dev->vmdev.vdev;
+	struct vdevice *vdev = dev->vdev;
 	struct vdevice_vq *vq = &dev->vqs[VIRTIO_VSOCK_VQ_IDX_RX];
 	bool added = false;
 
@@ -654,7 +657,7 @@ static void vsock_tx_one(struct virtio_vsock_device *dev, struct vdevice_vq *vq,
 /* Consume packets the driver posted on the TX queue. Assumes sock_lock held. */
 static void vsock_tx_process(struct virtio_vsock_device *dev)
 {
-	struct vdevice *vdev = &dev->vmdev.vdev;
+	struct vdevice *vdev = dev->vdev;
 	struct vdevice_vq *vq = &dev->vqs[VIRTIO_VSOCK_VQ_IDX_TX];
 	bool added = false;
 
@@ -1007,49 +1010,34 @@ static const struct vdevice_ops vsock_ops = {
 	.finalize_features = vsock_finalize_features,
 };
 
-/* Bridge the vdevice used-ring signal to the virtio-msg carrier */
-static void vsock_signal(struct vdevice *vdev, int qid)
-{
-	struct virtio_msg_dev *vmdev =
-		container_of(vdev, struct virtio_msg_dev, vdev);
-
-	virtio_msg_event_used(vmdev, qid);
-}
-
-static int vsock_bus_init(struct virtio_msg_bus *bus)
+static int vsock_bus_init(struct vdevice *vdev)
 {
 	struct virtio_vsock_device *dev = calloc(1, sizeof(*dev));
 
 	if (!dev)
 		return -1;
 
+	dev->vdev = vdev;
 	/* CID of the non-secure endpoint; 0 matches the reference driver */
 	dev->cid = 0;
 	TAILQ_INIT(&dev->send_queue);
 
-	vdevice_init(&dev->vmdev.vdev, dev->vqs, VIRTIO_VSOCK_VQ_IDX_COUNT,
-		     &vsock_ops);
-	dev->vmdev.vdev.dev_id = VIRTIO_VSOCK_DEVICE_ID;
-	dev->vmdev.vdev.vendor_id = 0;
-	dev->vmdev.vdev.signal = vsock_signal;
+	vdevice_init(vdev, dev->vqs, VIRTIO_VSOCK_VQ_IDX_COUNT, &vsock_ops);
+	vdev->dev_id = VIRTIO_VSOCK_DEVICE_ID;
+	vdev->vendor_id = 0;
+	vdev->priv = dev;
 
 	/* Notify callbacks are cleared by vdevice_init(), set them after */
 	dev->vqs[VIRTIO_VSOCK_VQ_IDX_RX].notify = vsock_rx_notify;
 	dev->vqs[VIRTIO_VSOCK_VQ_IDX_TX].notify = vsock_tx_notify;
 	dev->vqs[VIRTIO_VSOCK_VQ_IDX_EVENT].notify = vsock_event_notify;
 
-	if (virtio_msg_bus_add(bus, &dev->vmdev)) {
-		free(dev);
-		return -1;
-	}
-
 	return 0;
 }
 
-static void vsock_bus_deinit(struct virtio_msg_dev *vmdev)
+static void vsock_bus_deinit(struct vdevice *vdev)
 {
-	struct virtio_vsock_device *dev =
-		container_of(vmdev, struct virtio_vsock_device, vmdev);
+	struct virtio_vsock_device *dev = vdev_to_dev(vdev);
 
 	/* TODO: tear down sockets and drain the send queue */
 	free(dev);

@@ -6,6 +6,7 @@
 #include <kernel/notif.h>
 #include <kernel/vdevice.h>
 #include <kernel/virtio_msg.h>
+#include <malloc.h>
 #include <string.h>
 #include <trace.h>
 #include <util.h>
@@ -135,7 +136,9 @@ static void virtio_msg_dma_unmap(struct vdevice *vdev, void *va, size_t size)
 	bus->ops->unmap_area(bus->ops_cookie, va, size);
 }
 
-int virtio_msg_bus_add(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev)
+/* Attach a device to the first free bus slot; sets vmdev->dev_id and ->bus */
+static int virtio_msg_bus_add(struct virtio_msg_bus *bus,
+			      struct virtio_msg_dev *vmdev)
 {
 	uint16_t n = 0;
 
@@ -152,6 +155,47 @@ int virtio_msg_bus_add(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev)
 	}
 
 	return -1;
+}
+
+/*
+ * Bridge the device core's used-ring signal to the virtio-msg carrier. The
+ * core only knows about struct vdevice; recover the transport wrapper and
+ * forward to the carrier's EVENT_USED path.
+ */
+static void virtio_msg_dev_signal(struct vdevice *vdev, int qid)
+{
+	struct virtio_msg_dev *vmdev =
+		container_of(vdev, struct virtio_msg_dev, vdev);
+
+	virtio_msg_event_used(vmdev, qid);
+}
+
+int virtio_msg_bus_attach_driver(struct virtio_msg_bus *bus,
+				 struct virtio_bus_driver *drv)
+{
+	struct virtio_msg_dev *vmdev = calloc(1, sizeof(*vmdev));
+
+	if (!vmdev)
+		return -1;
+
+	/*
+	 * Own the transport wrapper here so the device type only deals with
+	 * struct vdevice. Attach it to the bus, then let the driver initialise
+	 * the device core it wraps (vdevice_init(), queues, private state).
+	 */
+	if (virtio_msg_bus_add(bus, vmdev)) {
+		free(vmdev);
+		return -1;
+	}
+	vmdev->vdev.signal = virtio_msg_dev_signal;
+
+	if (drv->init(&vmdev->vdev)) {
+		bus->devs[vmdev->dev_id] = NULL;
+		free(vmdev);
+		return -1;
+	}
+
+	return 0;
 }
 
 struct virtio_msg_dev *virtio_msg_bus_device(struct virtio_msg_bus *bus,

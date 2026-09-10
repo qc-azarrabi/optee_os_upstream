@@ -121,22 +121,35 @@ struct virtio_msg_dev {
 /*
  * struct virtio_bus_driver - a device-type registration.
  *
- * The analog of QTEE's ffa_bus_driver: when a new bus (driver connection)
- * appears, its init() is called to allocate and attach the device instances
- * this driver provides; deinit() tears one down.
+ * The analog of QTEE's ffa_bus_driver. When a new bus (driver connection)
+ * appears, the framework allocates one struct virtio_msg_dev per registered
+ * driver, attaches it to the bus and calls init() with the device core it
+ * wraps; deinit() tears that device down. The device type only ever sees
+ * struct vdevice: it never needs to know about the virtio-msg transport.
+ *
+ * init() typically calls vdevice_init() on @vdev, sets @vdev->dev_id /
+ * ->vendor_id and the per-queue notify callbacks, and stashes its private
+ * state in @vdev->priv. It returns 0 on success or negative to decline.
  */
 struct virtio_bus_driver {
-	int (*init)(struct virtio_msg_bus *bus);
-	void (*deinit)(struct virtio_msg_dev *vmdev);
+	int (*init)(struct vdevice *vdev);
+	void (*deinit)(struct vdevice *vdev);
 };
 
 /* Initialise an empty bus */
 void virtio_msg_bus_init(struct virtio_msg_bus *bus,
 			 const struct virtio_msg_bus_ops *ops, void *cookie);
 
-/* Attach a device to the first free slot; sets vmdev->dev_id and ->bus */
-int virtio_msg_bus_add(struct virtio_msg_bus *bus,
-		       struct virtio_msg_dev *vmdev);
+/*
+ * virtio_msg_bus_attach_driver() - instantiate one driver's device on a bus.
+ *
+ * Allocates a struct virtio_msg_dev, attaches it to @bus, wires the standard
+ * used-ring signal bridge and calls drv->init() on the wrapped struct vdevice.
+ * Returns 0 on success or negative if the driver declined or no slot/memory
+ * was available.
+ */
+int virtio_msg_bus_attach_driver(struct virtio_msg_bus *bus,
+				 struct virtio_bus_driver *drv);
 
 /* Look up a device by its dev_id, or NULL */
 struct virtio_msg_dev *virtio_msg_bus_device(struct virtio_msg_bus *bus,
