@@ -106,23 +106,15 @@ struct virtio_msg_bus {
 	void *ops_cookie;
 };
 
-/* Per-device event configuration set by the driver (EVENT_CONFIGURE) */
-struct virtio_msg_dev_notif {
-	uint8_t ev_type;
-	uint16_t notify_id;
-};
-
 /*
  * struct virtio_msg_dev - a device as seen on a virtio-msg bus.
  * @vdev:	the device core; first member so container_of() works.
  * @dev_id:	index of this device in bus->devs[].
- * @notif:	driver-requested notification configuration.
  * @bus:	owning bus (carries the carrier ops and cookie).
  */
 struct virtio_msg_dev {
 	struct vdevice vdev;
 	uint16_t dev_id;
-	struct virtio_msg_dev_notif notif;
 	struct virtio_msg_bus *bus;
 };
 
