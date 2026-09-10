@@ -171,7 +171,7 @@ static void virtio_msg_dev_signal(struct vdevice *vdev, int qid)
 }
 
 int virtio_msg_bus_attach_driver(struct virtio_msg_bus *bus,
-				 struct virtio_bus_driver *drv)
+				 struct virtio_msg_bus_driver *drv)
 {
 	struct virtio_msg_dev *vmdev = calloc(1, sizeof(*vmdev));
 

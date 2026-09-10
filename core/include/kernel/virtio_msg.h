@@ -119,7 +119,7 @@ struct virtio_msg_dev {
 };
 
 /*
- * struct virtio_bus_driver - a device-type registration.
+ * struct virtio_msg_bus_driver - a device-type registration.
  *
  * The analog of QTEE's ffa_bus_driver. When a new bus (driver connection)
  * appears, the framework allocates one struct virtio_msg_dev per registered
@@ -131,7 +131,7 @@ struct virtio_msg_dev {
  * ->vendor_id and the per-queue notify callbacks, and stashes its private
  * state in @vdev->priv. It returns 0 on success or negative to decline.
  */
-struct virtio_bus_driver {
+struct virtio_msg_bus_driver {
 	int (*init)(struct vdevice *vdev);
 	void (*deinit)(struct vdevice *vdev);
 };
@@ -149,7 +149,7 @@ void virtio_msg_bus_init(struct virtio_msg_bus *bus,
  * was available.
  */
 int virtio_msg_bus_attach_driver(struct virtio_msg_bus *bus,
-				 struct virtio_bus_driver *drv);
+				 struct virtio_msg_bus_driver *drv);
 
 /* Look up a device by its dev_id, or NULL */
 struct virtio_msg_dev *virtio_msg_bus_device(struct virtio_msg_bus *bus,

@@ -41,6 +41,6 @@ void virtio_msg_ffa_recv(struct thread_smc_1_2_regs *args, uint16_t caller_id);
  * ffa_bus_dev_driver_add(). Must be called before any endpoint is created
  * (i.e. from an init level no later than the LSP init).
  */
-TEE_Result virtio_msg_ffa_register_driver(struct virtio_bus_driver *drv);
+TEE_Result virtio_msg_ffa_register_driver(struct virtio_msg_bus_driver *drv);
 
 #endif /*__KERNEL_VIRTIO_MSG_FFA_H*/

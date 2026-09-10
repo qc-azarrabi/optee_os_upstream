@@ -20,7 +20,7 @@
 /*
  * virtio-vsock device (backend), see the virtio spec "Socket Device".
  *
- * This is a device-type driver on the virtio-msg bus (struct virtio_bus_driver).
+ * This is a device-type driver on the virtio-msg bus (struct virtio_msg_bus_driver).
  * One instance is attached to every bus (FF-A endpoint). The device-facing side
  * is the vdevice/virtio-msg transport; the TA-facing side is the GP socket API
  * exposed through kernel/virtio_vsock.h.
@@ -1043,7 +1043,7 @@ static void vsock_bus_deinit(struct vdevice *vdev)
 	free(dev);
 }
 
-static struct virtio_bus_driver vsock_driver = {
+static struct virtio_msg_bus_driver vsock_driver = {
 	.init = vsock_bus_init,
 	.deinit = vsock_bus_deinit,
 };

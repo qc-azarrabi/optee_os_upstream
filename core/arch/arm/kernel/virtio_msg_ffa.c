@@ -155,7 +155,7 @@ static struct virtio_msg_ffa_ep_head ep_head =
 /* Serialises endpoint creation and lookup */
 static unsigned int ep_head_lock = SPINLOCK_UNLOCK;
 
-static struct virtio_bus_driver *drivers[VIRTIO_MSG_FFA_MAX_DRV];
+static struct virtio_msg_bus_driver *drivers[VIRTIO_MSG_FFA_MAX_DRV];
 static unsigned int drivers_count;
 
 /*
@@ -585,7 +585,7 @@ out:
 		       VIRTIO_MSG_MAX_SIZE - msg->msg_size);
 }
 
-TEE_Result virtio_msg_ffa_register_driver(struct virtio_bus_driver *drv)
+TEE_Result virtio_msg_ffa_register_driver(struct virtio_msg_bus_driver *drv)
 {
 	if (drivers_count == VIRTIO_MSG_FFA_MAX_DRV)
 		return TEE_ERROR_OUT_OF_MEMORY;
