@@ -86,12 +86,23 @@ struct virtio_msg_dev;
  * struct virtio_msg_bus_ops - carrier callbacks, provided by the FF-A layer.
  * @map_area:	translate a driver bus address to a VA valid for @len bytes.
  * @unmap_area:	release a translation from @map_area.
- * @send_event_used: notify the driver that a queue's used ring advanced.
+ * @notify:	deliver a device- or bus-originated message to the driver
+ *		(QTEE's virtio_msg_bus::interrupt()). The caller fills in
+ *		@msg (type, msg_id, dev_id and payload) before calling; the
+ *		carrier only needs enough of it to pick a delivery mechanism
+ *		(e.g. an FF-A notification bit), not to transmit the bytes.
+ *		@vmdev is NULL for bus-level messages that are not about any
+ *		single device (e.g. VIRTIO_MSG_BUS_EVENT_DEVICE).
+ *
+ * Current producers: virtio_msg_event_used() (VIRTIO_MSG_EVENT_USED).
+ * TODO: VIRTIO_MSG_BUS_EVENT_DEVICE (device add/remove on the bus) and
+ * VIRTIO_MSG_EVENT_CONFIG (device config change) are not produced yet.
  */
 struct virtio_msg_bus_ops {
 	void *(*map_area)(void *cookie, uint64_t bus_addr, size_t len);
 	void (*unmap_area)(void *cookie, void *va, size_t len);
-	void (*send_event_used)(struct virtio_msg_dev *vmdev, int qid);
+	void (*notify)(struct virtio_msg_bus *bus, struct virtio_msg_dev *vmdev,
+		      struct virtio_msg *msg);
 };
 
 /*
@@ -171,8 +182,8 @@ void virtio_msg_recv(struct virtio_msg *msg, size_t max_size,
 /*
  * virtio_msg_event_used() - device-originated used-ring notification.
  *
- * Called from a device's signal callback; forwards to the carrier's
- * send_event_used().
+ * Called from a device's signal callback. Builds a VIRTIO_MSG_EVENT_USED
+ * message and hands it to the carrier's notify().
  */
 void virtio_msg_event_used(struct virtio_msg_dev *vmdev, int qid);
 

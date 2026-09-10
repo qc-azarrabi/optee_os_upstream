@@ -105,6 +105,10 @@ struct msg_event_avail {
 	uint32_t next_offset_wrap;
 } __packed;
 
+struct msg_event_used {
+	uint32_t index;
+} __packed;
+
 void virtio_msg_bus_init(struct virtio_msg_bus *bus,
 			 const struct virtio_msg_bus_ops *ops, void *cookie)
 {
@@ -699,7 +703,19 @@ void virtio_msg_recv(struct virtio_msg *msg, size_t max_size,
 void virtio_msg_event_used(struct virtio_msg_dev *vmdev, int qid)
 {
 	struct virtio_msg_bus *bus = vmdev->bus;
+	uint8_t raw_msg[sizeof(struct virtio_msg) + sizeof(struct msg_event_used)];
+	struct virtio_msg *msg = (void *)raw_msg;
+	struct msg_event_used *event = (void *)msg->payload;
 
-	if (bus->ops->send_event_used)
-		bus->ops->send_event_used(vmdev, qid);
+	if (!bus->ops->notify)
+		return;
+
+	memset(msg, 0, sizeof(raw_msg));
+	msg->type = VIRTIO_MSG_TYPE_REQUEST;
+	msg->msg_id = VIRTIO_MSG_EVENT_USED;
+	msg->dev_id = vmdev->dev_id;
+	msg->msg_size = sizeof(raw_msg);
+	event->index = qid;
+
+	bus->ops->notify(bus, vmdev, msg);
 }

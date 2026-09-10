@@ -164,7 +164,7 @@ static unsigned int drivers_count;
  * mobj_ffa_get_by_cookie() retrieves the shared memory whether the SPMC is
  * external (S-EL2, where it populates the mobj from the RX buffer) or internal
  * (S-EL1). No topology conditional is needed here; the only topology-specific
- * code in this file is the outbound notification in send_event_used().
+ * code in this file is the outbound notification in virtio_msg_ffa_notify().
  */
 static struct virtio_area *ep_find_area(struct virtio_msg_ffa_ep *ep,
 					uint16_t area_id)
@@ -294,10 +294,23 @@ static void virtio_msg_ffa_unmap_area(void *cookie, void *va, size_t len)
 	}
 }
 
-static void virtio_msg_ffa_send_event_used(struct virtio_msg_dev *vmdev,
-					   int qid __unused)
+/*
+ * virtio_msg_ffa_notify() - deliver a device- or bus-originated message to
+ * the driver as an FF-A notification.
+ *
+ * Only the delivery method matters here, not the message bytes: with
+ * NOTIF_ASSISTED delivery the driver polls the message content itself once
+ * woken, so we only need to raise the endpoint's negotiated notification bit.
+ *
+ * TODO: VIRTIO_MSG_BUS_EVENT_DEVICE and VIRTIO_MSG_EVENT_CONFIG have no
+ * producer yet (see virtio_msg.h); once added, they arrive here the same way
+ * VIRTIO_MSG_EVENT_USED does, with @vmdev NULL for the bus-level message.
+ */
+static void virtio_msg_ffa_notify(struct virtio_msg_bus *bus,
+				  struct virtio_msg_dev *vmdev __unused,
+				  struct virtio_msg *msg __unused)
 {
-	struct virtio_msg_ffa_ep *ep = vmdev->bus->ops_cookie;
+	struct virtio_msg_ffa_ep *ep = bus->ops_cookie;
 
 	if (ep->ev_type != FFA_BUS_EVENT_NOTIF_ASSISTED)
 		return;
@@ -305,17 +318,16 @@ static void virtio_msg_ffa_send_event_used(struct virtio_msg_dev *vmdev,
 #if !defined(CFG_CORE_SEL1_SPMC)
 	if (spmc_ffa_set_notification(ep->ffa_ep_id, 0,
 				      BIT64(ep->ev_notify_id)))
-		DMSG("EVENT_USED notification to %#"PRIx16" failed",
-		     ep->ffa_ep_id);
+		DMSG("Notification to %#"PRIx16" failed", ep->ffa_ep_id);
 #else
-	DMSG("EVENT_USED notification unsupported with S-EL1 SPMC");
+	DMSG("Notification unsupported with S-EL1 SPMC");
 #endif
 }
 
 static const struct virtio_msg_bus_ops virtio_msg_ffa_bus_ops = {
 	.map_area = virtio_msg_ffa_map_area,
 	.unmap_area = virtio_msg_ffa_unmap_area,
-	.send_event_used = virtio_msg_ffa_send_event_used,
+	.notify = virtio_msg_ffa_notify,
 };
 
 /* Endpoint management */
