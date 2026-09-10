@@ -93,10 +93,6 @@ struct virtio_msg_dev;
  *		(e.g. an FF-A notification bit), not to transmit the bytes.
  *		@vmdev is NULL for bus-level messages that are not about any
  *		single device (e.g. VIRTIO_MSG_BUS_EVENT_DEVICE).
- *
- * Current producers: virtio_msg_event_used() (VIRTIO_MSG_EVENT_USED).
- * TODO: VIRTIO_MSG_BUS_EVENT_DEVICE (device add/remove on the bus) and
- * VIRTIO_MSG_EVENT_CONFIG (device config change) are not produced yet.
  */
 struct virtio_msg_bus_ops {
 	void *(*map_area)(void *cookie, uint64_t bus_addr, size_t len);

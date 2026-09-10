@@ -301,10 +301,6 @@ static void virtio_msg_ffa_unmap_area(void *cookie, void *va, size_t len)
  * Only the delivery method matters here, not the message bytes: with
  * NOTIF_ASSISTED delivery the driver polls the message content itself once
  * woken, so we only need to raise the endpoint's negotiated notification bit.
- *
- * TODO: VIRTIO_MSG_BUS_EVENT_DEVICE and VIRTIO_MSG_EVENT_CONFIG have no
- * producer yet (see virtio_msg.h); once added, they arrive here the same way
- * VIRTIO_MSG_EVENT_USED does, with @vmdev NULL for the bus-level message.
  */
 static void virtio_msg_ffa_notify(struct virtio_msg_bus *bus,
 				  struct virtio_msg_dev *vmdev __unused,
