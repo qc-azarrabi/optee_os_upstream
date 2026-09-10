@@ -87,16 +87,11 @@ struct virtio_msg_dev;
  * @map_area:	translate a driver bus address to a VA valid for @len bytes.
  * @unmap_area:	release a translation from @map_area.
  * @send_event_used: notify the driver that a queue's used ring advanced.
- * @transfer:	originate a request and (optionally) collect the response.
- *		DEVICE role: NULL (inbound only). DRIVER role (future): used by
- *		virtio_msg_send_request(). @resp NULL means fire-and-forget.
  */
 struct virtio_msg_bus_ops {
 	void *(*map_area)(void *cookie, uint64_t bus_addr, size_t len);
 	void (*unmap_area)(void *cookie, void *va, size_t len);
 	void (*send_event_used)(struct virtio_msg_dev *vmdev, int qid);
-	int (*transfer)(void *cookie, struct virtio_msg *req,
-			struct virtio_msg *resp);
 };
 
 /*
