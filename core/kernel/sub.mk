@@ -63,3 +63,4 @@ endif
 srcs-y += nv_counter.c
 srcs-$(CFG_CALLOUT) += callout.c
 srcs-$(CFG_VIRTIO) += vdevice.c
+srcs-$(CFG_VIRTIO_MSG) += virtio_msg.c

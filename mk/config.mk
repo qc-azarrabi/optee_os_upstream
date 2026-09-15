@@ -1416,3 +1416,9 @@ $(eval $(call cfg-depends-all,CFG_CORE_DYN_PROTMEM,CFG_CORE_DYN_SHM,CFG_SECURE_D
 # used/available ring handling. It is transport-agnostic and does not by
 # itself provide any means of communicating with a virtio driver.
 CFG_VIRTIO ?= n
+
+# CFG_VIRTIO_MSG enables the virtio-msg transport and bus layers on top of
+# CFG_VIRTIO. It implements the message-based virtio protocol (replacing MMIO
+# register access) but not any particular message carrier.
+CFG_VIRTIO_MSG ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG,CFG_VIRTIO))
