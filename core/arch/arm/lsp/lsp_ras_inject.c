@@ -132,12 +132,17 @@ static void ras_direct_req_handler(struct thread_smc_1_2_regs *args,
 	args->a3 = ret;
 }
 
+static const uint32_t ras_lsp_uuid[] __nex_data = {
+	0x7011a688, 0x4dde4053, 0xa5a97bac, 0xf13b8cd4,
+};
+
 static struct spmc_lsp_desc ras_lsp __nex_data = {
 	.name = "ras_lsp",
 	.direct_req = ras_direct_req_handler,
 	.properties = FFA_PART_PROP_DIRECT_REQ_RECV |
 		      FFA_PART_PROP_DIRECT_REQ_SEND,
-	.uuid_words = { 0x7011a688, 0x4dde4053, 0xa5a97bac, 0xf13b8cd4 },
+	.uuid_words = ras_lsp_uuid,
+	.uuid_count = ARRAY_SIZE(ras_lsp_uuid) / SPMC_WORDS_PER_UUID,
 };
 
 static TEE_Result ras_lsp_init(void)
