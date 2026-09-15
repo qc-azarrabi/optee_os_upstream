@@ -1411,3 +1411,8 @@ CFG_TA_LIBGCC ?= y
 # normal world.
 CFG_CORE_DYN_PROTMEM ?= n
 $(eval $(call cfg-depends-all,CFG_CORE_DYN_PROTMEM,CFG_CORE_DYN_SHM,CFG_SECURE_DATA_PATH))
+
+# CFG_VIRTIO enables the virtio device (backend) core: vring parsing and
+# used/available ring handling. It is transport-agnostic and does not by
+# itself provide any means of communicating with a virtio driver.
+CFG_VIRTIO ?= n
