@@ -20,6 +20,9 @@
 #include <kernel/thread_private.h>
 #include <kernel/thread_spmc.h>
 #include <kernel/virtualization.h>
+#if defined(CFG_VIRTIO_MSG_FFA)
+#include <kernel/virtio_msg_ffa.h>
+#endif
 #include <libfdt.h>
 #include <mm/core_mmu.h>
 #include <mm/mobj.h>
@@ -951,6 +954,37 @@ optee_lsp_handle_direct_request(struct thread_smc_1_2_regs *args,
 	}
 
 	if (args->a0 == FFA_MSG_SEND_DIRECT_REQ2) {
+#if defined(CFG_VIRTIO_MSG_FFA)
+		/*
+		 * The virtio-msg bus over FF-A is carried on DIRECT_REQ2
+		 * addressed to the virtio-msg UUID
+		 * (c66028b5-2498-4aa1-9de7-77da6122abf0). Any other UUID on
+		 * REQ2 is not supported by the core endpoint.
+		 */
+		if (args->a2 == 0xa14a9824b52860c6 &&
+		    args->a3 == 0xf0ab2261da77e79d) {
+			/* The FF-A bus and its calloc() state belong to the sender VM. */
+			if (IS_ENABLED(CFG_NS_VIRTUALIZATION) &&
+			    virt_set_guest(get_sender_id(args->a1))) {
+				set_simple_ret_val(args, FFA_INVALID_PARAMETERS);
+				return;
+			}
+			if (virtio_msg_ffa_recv(args, FFA_SRC(args->a1)) ==
+			    VIRTIO_MSG_STATUS_BUSY) {
+				if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+					virt_unset_guest();
+				set_simple_ret_val(args, FFA_BUSY);
+				return;
+			}
+			if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+				virt_unset_guest();
+			args->a0 = FFA_MSG_SEND_DIRECT_RESP2;
+			args->a1 = swap_src_dst(args->a1);
+			args->a2 = 0;
+			args->a3 = 0;
+			return;
+		}
+#endif
 		set_simple_ret_val(args, FFA_NOT_SUPPORTED);
 		return;
 	}
@@ -2590,6 +2624,10 @@ TEE_Result spmc_register_lsp(struct spmc_lsp_desc *desc)
 static uint32_t optee_core_lsp_uuids[] __nex_data = {
 	/* UUID 486178e0-e7f8-11e3-bc5e-0002a5d5c51b */
 	0xe0786148, 0xe311f8e7, 0x02005ebc, 0x1bc5d5a5,
+#if defined(CFG_VIRTIO_MSG_FFA)
+	/* UUID c66028b5-2498-4aa1-9de7-77da6122abf0 */
+	0xb52860c6, 0xa14a9824, 0xda77e79d, 0xf0ab2261,
+#endif
 };
 
 static struct spmc_lsp_desc optee_core_lsp __nex_data = {
@@ -2597,6 +2635,10 @@ static struct spmc_lsp_desc optee_core_lsp __nex_data = {
 	.direct_req = optee_lsp_handle_direct_request,
 	.properties = FFA_PART_PROP_DIRECT_REQ_RECV |
 		      FFA_PART_PROP_DIRECT_REQ_SEND |
+#if defined(CFG_VIRTIO_MSG_FFA)
+		      FFA_PART_PROP_DIRECT_REQ2_RECV |
+		      FFA_PART_PROP_DIRECT_REQ2_SEND |
+#endif
 #ifdef CFG_NS_VIRTUALIZATION
 		      FFA_PART_PROP_NOTIF_CREATED |
 		      FFA_PART_PROP_NOTIF_DESTROYED |

@@ -33,6 +33,7 @@ srcs-y += thread_optee_smc.c
 srcs-$(CFG_ARM32_core) += thread_optee_smc_a32.S
 srcs-$(CFG_ARM64_core) += thread_optee_smc_a64.S
 endif
+srcs-$(CFG_VIRTIO_MSG_FFA) += virtio_msg_ffa.c
 srcs-y += abort.c
 srcs-$(CFG_WITH_VFP) += vfp.c
 ifeq ($(CFG_WITH_VFP),y)

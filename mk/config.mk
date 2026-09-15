@@ -1422,3 +1422,10 @@ CFG_VIRTIO ?= n
 # register access) but not any particular message carrier.
 CFG_VIRTIO_MSG ?= n
 $(eval $(call cfg-depends-all,CFG_VIRTIO_MSG,CFG_VIRTIO))
+
+# CFG_VIRTIO_MSG_FFA carries virtio-msg over FF-A (Arm DEN0153). It requires
+# FF-A support and, for sending EVENT_USED to the driver, asynchronous
+# notifications.
+CFG_VIRTIO_MSG_FFA ?= n
+$(eval $(call cfg-depends-all,CFG_VIRTIO_MSG_FFA,CFG_VIRTIO_MSG,CFG_CORE_FFA \
+	CFG_CORE_ASYNC_NOTIF))
